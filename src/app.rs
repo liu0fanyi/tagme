@@ -47,6 +47,7 @@ struct RemoveTodoArgs {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MoveTodoArgs {
     id: u32,
     target_parent_id: Option<u32>,
@@ -121,52 +122,129 @@ pub fn App() -> impl IntoView {
         let log_clone = log.clone();
         
         let on_mouseup = Closure::<dyn FnMut(_)>::new(move |_ev: web_sys::MouseEvent| {
-            if let Some(dragged_id) = dragging_id.get() {
-                if let Some(target_id) = drop_target_id.get() {
+            log_clone(format!("🔵 Global mouseup triggered"));
+            
+            if let Some(dragged_id) = dragging_id.get_untracked() {
+                log_clone(format!("🔵 Dragging ID: {}", dragged_id));
+                
+                if let Some(target_id) = drop_target_id.get_untracked() {
+                    log_clone(format!("🔵 Drop target ID: {}", target_id));
+                    
                     if dragged_id != target_id {
-                        log_clone(format!("Drop {} on {}", dragged_id, target_id));
+                        log_clone(format!("🟢 Drop {} on {}", dragged_id, target_id));
                         
                         // Get target todo info
-                        let pos = drop_position.get();
-                        let current_todos = todos.get();
+                        let pos: f64 = drop_position.get_untracked();
+                        let pos = pos.max(0.0).min(1.0); // Clamp to 0-1
+                        log_clone(format!("🔵 Drop position: {:.2}", pos));
+                        
+                        let current_todos = todos.get_untracked();
+                        
+                        // Log all todos for better debugging
+                        log_clone(format!("📋 All todos: {}", current_todos.iter()
+                            .map(|t| format!("id={} '{}' pos={}", t.id, t.text, t.position))
+                            .collect::<Vec<_>>()
+                            .join(", ")));
                         
                         if let Some(target_todo) = current_todos.iter().find(|t| t.id == target_id) {
+                            log_clone(format!("📋 Target todo: id={} '{}' parent={:?} pos={}", target_todo.id, target_todo.text, target_todo.parent_id, target_todo.position));
+                            
                             let target_parent_id = target_todo.parent_id;
                             let target_position = target_todo.position;
                             
                             // Determine drop type based on position
-                            let (final_parent, final_pos) = if pos < 0.25 {
+                            let (final_parent, mut final_pos) = if pos < 0.25 {
                                 // Drop before
+                                log_clone(format!("📍 Dropping BEFORE (parent: {:?}, pos: {})", target_parent_id, target_position));
                                 (target_parent_id, target_position)
                             } else if pos > 0.75 {
                                 // Drop after
+                                log_clone(format!("📍 Dropping AFTER (parent: {:?}, pos: {})", target_parent_id, target_position + 1));
                                 (target_parent_id, target_position + 1)
                             } else {
                                 // Nest as child
+                                log_clone(format!("📍 Dropping as CHILD (parent: {}, pos: 0)", target_id));
                                 (Some(target_id), 0)
                             };
                             
+                            // Check if source and target are the same
+                            if let Some(dragged_todo) = current_todos.iter().find(|t| t.id == dragged_id) {
+                                log_clone(format!("📋 Dragged todo: id={} '{}' parent={:?} pos={}", dragged_todo.id, dragged_todo.text, dragged_todo.parent_id, dragged_todo.position));
+                                log_clone(format!("📋 Target: parent={:?}, pos={}", final_parent, final_pos));
+                                
+                                if dragged_todo.parent_id == final_parent && dragged_todo.position == final_pos {
+                                    log_clone(format!("⚠️ Source and target are the same, skipping"));
+                                    set_dragging_id.set(None);
+                                    set_drop_target_id.set(None);
+                                    return;
+                                }
+
+                                // Adjust position if dragging downwards in the same list
+                                // When we remove the item, indices shift, so we need to decrement the target position
+                                if dragged_todo.parent_id == final_parent && dragged_todo.position < final_pos {
+                                    log_clone(format!("⬇️ Dragging down in same list, adjusting pos from {} to {}", final_pos, final_pos - 1));
+                                    final_pos -= 1;
+                                }
+                            }
+                            
+                            // Log all todos for debugging
+                            log_clone(format!("📋 All todos: {}", current_todos.iter()
+                                .map(|t| format!("id={} pos={}", t.id, t.position))
+                                .collect::<Vec<_>>()
+                                .join(", ")));
+                            
+                            log_clone(format!("🚀 Calling move_todo_item..."));
+                            
                             // Call backend
+                            let log_async = log_clone.clone();
                             spawn_local(async move {
                                 let args = serde_wasm_bindgen::to_value(&MoveTodoArgs {
                                     id: dragged_id,
                                     target_parent_id: final_parent,
                                     target_position: final_pos
                                 }).unwrap();
-                                invoke("move_todo_item", args).await;
+                                
+                                log_async(format!("📤 Invoking backend with id={}, parent={:?}, pos={}", dragged_id, final_parent, final_pos));
+                                
+                                // Log to browser console for debugging
+                                web_sys::console::log_1(&JsValue::from_str(&format!("[JS] Calling move_todo_item with id={}, parent={:?}, pos={}", dragged_id, final_parent, final_pos)));
+                                
+                                // Call backend with error handling
+                                let result = invoke("move_todo_item", args).await;
+                                
+                                web_sys::console::log_2(&JsValue::from_str("[JS] invoke returned:"), &result);
+                                
+                                // Check if there was an error
+                                if result.is_undefined() || result.is_null() {
+                                    log_async(format!("⚠️ Backend returned undefined/null"));
+                                    web_sys::console::warn_1(&JsValue::from_str("[JS] Backend returned undefined/null!"));
+                                } else {
+                                    log_async(format!("✅ Backend call complete"));
+                                }
                                 
                                 // Reload todos
+                                log_async(format!("🔄 Reloading todos..."));
                                 let saved_todos: Vec<TodoItem> = serde_wasm_bindgen::from_value(
                                     invoke("load_todos", JsValue::NULL).await
                                 ).unwrap_or_default();
+                                let count = saved_todos.len();
                                 set_todos.set(saved_todos);
+                                log_async(format!("✅ Todos reloaded, count: {}", count));
                             });
+                        } else {
+                            log_clone(format!("❌ Target todo not found!"));
                         }
+                    } else {
+                        log_clone(format!("⚠️ Dragging onto self, ignoring"));
                     }
+                } else {
+                    log_clone(format!("⚠️ No drop target"));
                 }
                 // Clear drag state
                 set_dragging_id.set(None);
                 set_drop_target_id.set(None);
+            } else {
+                log_clone(format!("⚠️ No dragging ID"));
             }
         });
         
@@ -470,19 +548,38 @@ where
     };
 
     // Mouse enter - track potential drop target
-    let on_mouseenter = move |ev: web_sys::MouseEvent| {
-        if dragging_id.get().is_some() {
+    let update_position = move |ev: web_sys::MouseEvent| {
+        if dragging_id.get_untracked().is_some() {
             set_drop_target_id.set(Some(id));
             
-            // Calculate relative position (0.0 to 1.0)
+            // Calculate relative position (0.0 = top, 1.0 = bottom)
             if let Some(target) = ev.current_target() {
                 if let Some(element) = target.dyn_ref::<web_sys::HtmlElement>() {
                     let rect = element.get_bounding_client_rect();
                     let y = ev.client_y() as f64;
-                    let rel_y = (y - rect.top()) / rect.height();
-                    set_drop_position.set(rel_y);
+                    let top = rect.top();
+                    let height = rect.height();
+                    
+                    if height > 0.0 {
+                        let relative_y = ((y - top) / height).max(0.0).min(1.0);
+                        set_drop_position.set(relative_y);
+                    }
                 }
             }
+        }
+    };
+
+    let on_mouseenter = {
+        let update_position = update_position.clone();
+        move |ev: web_sys::MouseEvent| {
+            update_position(ev);
+        }
+    };
+
+    let on_mousemove = {
+        let update_position = update_position.clone();
+        move |ev: web_sys::MouseEvent| {
+            update_position(ev);
         }
     };
 
@@ -521,6 +618,7 @@ where
             class=item_class
             on:mousedown=on_mousedown
             on:mouseenter=on_mouseenter
+            on:mousemove=on_mousemove
         >
             <div class="flex items-center gap-2 select-none">
                 <span class="text-gray-400 cursor-grab">"⠿"</span>

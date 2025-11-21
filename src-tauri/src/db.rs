@@ -111,12 +111,14 @@ pub fn save_todo(app_handle: &AppHandle, text: String) -> Result<u32> {
     let conn = Connection::open(db_path)?;
     
     // Get max position to append to end
-    let max_pos: Option<i32> = conn.query_row(
-        "SELECT MAX(position) FROM todos WHERE parent_id IS NULL",
+    let max_pos: Result<i32> = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) FROM todos WHERE parent_id IS NULL",
         [],
         |row| row.get(0),
-    ).unwrap_or(Some(0));
-    let position = max_pos.unwrap_or(0) + 1;
+    );
+    let position = max_pos.unwrap_or(-1) + 1;
+    
+    println!("[DB] Creating new todo with position: {}", position);
 
     conn.execute(
         "INSERT INTO todos (text, completed, parent_id, position) VALUES (?1, ?2, ?3, ?4)",
@@ -124,6 +126,7 @@ pub fn save_todo(app_handle: &AppHandle, text: String) -> Result<u32> {
     )?;
     
     let id = conn.last_insert_rowid() as u32;
+    println!("[DB] Created todo id={} at position={}", id, position);
     Ok(id)
 }
 

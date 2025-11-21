@@ -56,7 +56,11 @@ fn remove_todo_item(app_handle: tauri::AppHandle, id: u32) {
 
 #[tauri::command]
 fn move_todo_item(app_handle: tauri::AppHandle, id: u32, target_parent_id: Option<u32>, target_position: i32) {
-    let _ = db::move_todo(&app_handle, id, target_parent_id, target_position);
+    println!("[BACKEND] move_todo_item called: id={}, parent={:?}, pos={}", id, target_parent_id, target_position);
+    match db::move_todo(&app_handle, id, target_parent_id, target_position) {
+        Ok(_) => println!("[BACKEND] ✅ move_todo succeeded"),
+        Err(e) => println!("[BACKEND] ❌ move_todo failed: {}", e),
+    }
 }
 
 #[tauri::command]
@@ -82,8 +86,6 @@ pub fn run() {
             load_todos,
             add_todo_item,
             update_todo_status,
-            update_todo_status,
-            remove_todo_item,
             remove_todo_item,
             move_todo_item,
             log_message
