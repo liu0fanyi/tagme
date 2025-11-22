@@ -65,7 +65,7 @@ pub fn App() -> impl IntoView {
     let (content, set_content) = create_signal(String::new());
     let (editing, set_editing) = create_signal(true);
     let (todos, set_todos) = create_signal(Vec::<TodoItem>::new());
-    let (mode, set_mode) = create_signal("note");
+    let (mode, set_mode) = create_signal("todo");
     
     // Global drag state
     let (dragging_id, set_dragging_id) = create_signal(None::<u32>);
@@ -112,9 +112,11 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    /*
     let toggle_edit = move |_| {
         set_editing.update(|e| *e = !*e);
     };
+    */
 
     // Global mouseup handler for drag and drop
     Effect::new(move |_| {
@@ -142,30 +144,37 @@ pub fn App() -> impl IntoView {
                         
                         // Log all todos for better debugging
                         log_clone(format!("📋 All todos: {}", current_todos.iter()
-                            .map(|t| format!("id={} '{}' pos={}", t.id, t.text, t.position))
+                            .map(|t| format!("id={} '{}' p={:?} pos={}", t.id, t.text, t.parent_id, t.position))
                             .collect::<Vec<_>>()
                             .join(", ")));
                         
-                        if let Some(target_todo) = current_todos.iter().find(|t| t.id == target_id) {
-                            log_clone(format!("📋 Target todo: id={} '{}' parent={:?} pos={}", target_todo.id, target_todo.text, target_todo.parent_id, target_todo.position));
-                            
-                            let target_parent_id = target_todo.parent_id;
-                            let target_position = target_todo.position;
-                            
-                            // Determine drop type based on position
-                            let (final_parent, mut final_pos) = if pos < 0.25 {
-                                // Drop before
-                                log_clone(format!("📍 Dropping BEFORE (parent: {:?}, pos: {})", target_parent_id, target_position));
-                                (target_parent_id, target_position)
-                            } else if pos > 0.75 {
-                                // Drop after
-                                log_clone(format!("📍 Dropping AFTER (parent: {:?}, pos: {})", target_parent_id, target_position + 1));
-                                (target_parent_id, target_position + 1)
-                            } else {
-                                // Nest as child
-                                log_clone(format!("📍 Dropping as CHILD (parent: {}, pos: 0)", target_id));
-                                (Some(target_id), 0)
-                            };
+                        let (final_parent, mut final_pos) = if target_id == 0 {
+                            // Special case: Drop to root
+                            log_clone(format!("📍 Dropping to ROOT"));
+                            (None, 1000000)
+                        } else if let Some(target_todo) = current_todos.iter().find(|t| t.id == target_id) {
+                             log_clone(format!("📋 Target todo: id={} '{}' parent={:?} pos={}", target_todo.id, target_todo.text, target_todo.parent_id, target_todo.position));
+                             
+                             let target_parent_id = target_todo.parent_id;
+                             let target_position = target_todo.position;
+                             
+                             let pos: f64 = drop_position.get_untracked();
+                             let pos = pos.max(0.0).min(1.0);
+                             
+                             if pos < 0.25 {
+                                 log_clone(format!("📍 Dropping BEFORE (parent: {:?}, pos: {})", target_parent_id, target_position));
+                                 (target_parent_id, target_position)
+                             } else if pos > 0.75 {
+                                 log_clone(format!("📍 Dropping AFTER (parent: {:?}, pos: {})", target_parent_id, target_position + 1));
+                                 (target_parent_id, target_position + 1)
+                             } else {
+                                 log_clone(format!("📍 Dropping as CHILD (parent: {}, pos: 0)", target_id));
+                                 (Some(target_id), 0)
+                             }
+                        } else {
+                             log_clone(format!("❌ Target todo not found!"));
+                             return;
+                        };
                             
                             // Check if source and target are the same
                             if let Some(dragged_todo) = current_todos.iter().find(|t| t.id == dragged_id) {
@@ -189,7 +198,7 @@ pub fn App() -> impl IntoView {
                             
                             // Log all todos for debugging
                             log_clone(format!("📋 All todos: {}", current_todos.iter()
-                                .map(|t| format!("id={} pos={}", t.id, t.position))
+                                .map(|t| format!("id={} p={:?} pos={}", t.id, t.parent_id, t.position))
                                 .collect::<Vec<_>>()
                                 .join(", ")));
                             
@@ -216,10 +225,9 @@ pub fn App() -> impl IntoView {
                                 
                                 // Check if there was an error
                                 if result.is_undefined() || result.is_null() {
-                                    log_async(format!("⚠️ Backend returned undefined/null"));
-                                    web_sys::console::warn_1(&JsValue::from_str("[JS] Backend returned undefined/null!"));
+                                    log_async(format!("✅ Backend call complete (void return)"));
                                 } else {
-                                    log_async(format!("✅ Backend call complete"));
+                                    log_async(format!("✅ Backend call complete: {:?}", result));
                                 }
                                 
                                 // Reload todos
@@ -231,9 +239,7 @@ pub fn App() -> impl IntoView {
                                 set_todos.set(saved_todos);
                                 log_async(format!("✅ Todos reloaded, count: {}", count));
                             });
-                        } else {
-                            log_clone(format!("❌ Target todo not found!"));
-                        }
+
                     } else {
                         log_clone(format!("⚠️ Dragging onto self, ignoring"));
                     }
@@ -252,9 +258,11 @@ pub fn App() -> impl IntoView {
         on_mouseup.forget();
     });
 
+    /*
     let toggle_mode = move |_| {
         set_mode.update(|m| *m = if *m == "note" { "todo" } else { "note" });
     };
+    */
 
     let update_note = move |ev| {
         let val = event_target_value(&ev);
@@ -346,6 +354,7 @@ pub fn App() -> impl IntoView {
             >
                 <span class="text-xs text-yellow-800 font-bold pointer-events-none">"Sticky Note"</span>
                 <div class="flex gap-1">
+                    /*
                     <button
                         on:click=toggle_mode
                         on:mousedown=move |ev| ev.stop_propagation()
@@ -366,6 +375,7 @@ pub fn App() -> impl IntoView {
                     } else {
                         view! { <span class="w-6"></span> }.into_any()
                     }}
+                    */
                     <button
                         on:click=toggle_pin
                         on:mousedown=move |ev| ev.stop_propagation()
@@ -410,6 +420,7 @@ pub fn App() -> impl IntoView {
                                     name="todo-input"
                                     class="flex-1 bg-white/50 border-none rounded px-2 py-1 text-sm outline-none focus:bg-white"
                                     placeholder="Add todo..."
+                                    autocomplete="off"
                                 />
                                 <button type="submit" class="text-green-600 hover:text-green-700 font-bold">"+"</button>
                             </form>
@@ -442,6 +453,32 @@ pub fn App() -> impl IntoView {
                                     drop_position=drop_position
                                     set_drop_position=set_drop_position
                                 />
+                                {move || if dragging_id.get().is_some() {
+                                    view! {
+                                        <div
+                                            class=move || {
+                                                let base = "mt-2 h-12 border-2 border-dashed rounded flex items-center justify-center text-gray-400 transition-colors text-sm select-none";
+                                                if drop_target_id.get() == Some(0) {
+                                                    format!("{} border-blue-400 bg-blue-50 text-blue-600", base)
+                                                } else {
+                                                    format!("{} border-gray-300 bg-gray-50", base)
+                                                }
+                                            }
+                                            on:mouseenter=move |_| {
+                                                log("🖱️ Mouse ENTER root drop zone".to_string());
+                                                set_drop_target_id.set(Some(0));
+                                            }
+                                            on:mouseleave=move |_| {
+                                                log("🖱️ Mouse LEAVE root drop zone".to_string());
+                                                set_drop_target_id.set(None);
+                                            }
+                                        >
+                                            "Drop here to un-nest"
+                                        </div>
+                                    }.into_any()
+                                } else {
+                                    view! { <span /> }.into_any()
+                                }}
                             </div>
                         </div>
                     }.into_any()
@@ -532,8 +569,8 @@ where
     F4: Fn(String) + Clone + Send + 'static,
 {
     let id = todo.id;
-    let parent_id = todo.parent_id;
-    let position = todo.position;
+    // let parent_id = todo.parent_id;
+    // let position = todo.position;
 
     // Mouse down - start drag
     let on_mousedown = {
@@ -543,12 +580,13 @@ where
                 set_dragging_id.set(Some(id));
                 log(format!("Start dragging: {}", id));
                 ev.prevent_default();
+                ev.stop_propagation();
             }
         }
     };
 
     // Mouse enter - track potential drop target
-    let update_position = move |ev: web_sys::MouseEvent| {
+    let update_position = move |ev: &web_sys::MouseEvent| {
         if dragging_id.get_untracked().is_some() {
             set_drop_target_id.set(Some(id));
             
@@ -572,14 +610,15 @@ where
     let on_mouseenter = {
         let update_position = update_position.clone();
         move |ev: web_sys::MouseEvent| {
-            update_position(ev);
+            update_position(&ev);
         }
     };
 
     let on_mousemove = {
         let update_position = update_position.clone();
         move |ev: web_sys::MouseEvent| {
-            update_position(ev);
+            update_position(&ev);
+            ev.stop_propagation();
         }
     };
 
@@ -629,6 +668,7 @@ where
                         let toggle = toggle_todo.clone();
                         move |_| toggle(id)
                     }
+                    on:mousedown=move |ev| ev.stop_propagation()
                     class="cursor-pointer" 
                 />
                 <span class=move || format!(
@@ -643,6 +683,7 @@ where
                         move |_| del(id)
                     }
                     class="text-red-400 hover:text-red-600 text-xs"
+                    on:mousedown=move |ev| ev.stop_propagation()
                 >"×"</button>
             </div>
             <TodoList 
