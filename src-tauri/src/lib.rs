@@ -78,6 +78,11 @@ fn decrement_todo(app_handle: tauri::AppHandle, id: u32) {
     let _ = db::decrement_todo(&app_handle, id);
 }
 
+#[tauri::command]
+fn reset_all_todos(app_handle: tauri::AppHandle) {
+    let _ = db::reset_all_todos(&app_handle);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -100,7 +105,8 @@ pub fn run() {
             move_todo_item,
             log_message,
             set_todo_count,
-            decrement_todo
+            decrement_todo,
+            reset_all_todos
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

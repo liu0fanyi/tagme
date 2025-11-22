@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "app",
+  "productName": "TodoList",
   "version": "0.1.0",
-  "identifier": "com.app.app",
+  "identifier": "com.todolist.app",
   "build": {
     "beforeDevCommand": "trunk serve",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Sticky Note",
+        "title": "TodoList",
         "width": 300,
         "height": 300,
         "decorations": false,

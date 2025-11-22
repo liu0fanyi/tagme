@@ -316,3 +316,17 @@ pub fn decrement_todo(app_handle: &AppHandle, id: u32) -> Result<()> {
     
     Ok(())
 }
+
+pub fn reset_all_todos(app_handle: &AppHandle) -> Result<()> {
+    let app_dir = app_handle.path().app_data_dir().unwrap();
+    let db_path = app_dir.join("sticky_notes.db");
+    let conn = Connection::open(db_path)?;
+    
+    // Reset all todos to incomplete and reset countdown
+    conn.execute(
+        "UPDATE todos SET completed = 0, current_count = COALESCE(target_count, 0)",
+        [],
+    )?;
+    
+    Ok(())
+}

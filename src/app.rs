@@ -72,6 +72,9 @@ struct LogArgs {
     msg: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct ResetAllArgs {}
+
 #[component]
 pub fn App() -> impl IntoView {
     let (pinned, set_pinned) = create_signal(false);
@@ -394,6 +397,18 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    let reset_all_todos = move |_| {
+        spawn_local(async move {
+            // Call backend to reset all todos
+            invoke("reset_all_todos", JsValue::NULL).await;
+            // Reload todos
+            let saved_todos: Vec<TodoItem> = serde_wasm_bindgen::from_value(
+                invoke("load_todos", JsValue::NULL).await
+            ).unwrap_or_default();
+            set_todos.set(saved_todos);
+        });
+    };
+
 
 
     view! {
@@ -402,8 +417,16 @@ pub fn App() -> impl IntoView {
                 class="h-8 bg-yellow-200 flex justify-between items-center px-2 cursor-move select-none"
                 on:mousedown=start_drag
             >
-                <span class="text-xs text-yellow-800 font-bold pointer-events-none">"Sticky Note"</span>
+                <span class="text-xs text-yellow-800 font-bold pointer-events-none">"TodoList"</span>
                 <div class="flex gap-1">
+                    <button
+                        on:click=reset_all_todos
+                        on:mousedown=move |ev| ev.stop_propagation()
+                        class="px-2 py-0.5 text-xs rounded hover:bg-yellow-300 text-yellow-700 transition-colors"
+                        title="Reset all items to incomplete"
+                    >
+                        "↻"
+                    </button>
                     /*
                     <button
                         on:click=toggle_mode
