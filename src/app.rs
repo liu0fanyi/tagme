@@ -1,11 +1,6 @@
-use leptos::ev::MouseEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos::html::ElementChild;
-use web_sys::SubmitEvent;
-use serde::{Deserialize, Serialize};
-use wasm_bindgen::prelude::*;
-use regex::Regex;
+use serde::{Deserialize, Serialize}; use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 extern "C" {
@@ -13,78 +8,97 @@ extern "C" {
     async fn invoke(cmd: &str, args: JsValue) -> JsValue;
 }
 
+// Lightweight file listing from scan (no hash)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct FileListItem {
+    path: String,
+    size_bytes: u64,
+    last_modified: i64,
+}
+
+// Full file info for files in database (with hash)
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct FileInfo {
+    id: u32,
+    path: String,
+    content_hash: String,
+    size_bytes: u64,
+    last_modified: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct TagInfo {
+    id: u32,
+    name: String,
+    parent_id: Option<u32>,
+    color: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct FileWithTags {
+    file: FileInfo,
+    tags: Vec<TagInfo>,
+}
+
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct SetAlwaysOnTopArgs {
     always_on_top: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TodoItem {
-    pub id: u32,
-    pub text: String,
-    pub completed: bool,
-    pub parent_id: Option<u32>,
-    pub position: i32,
-    pub target_count: Option<i32>,
-    pub current_count: i32,
+#[derive(Serialize, Deserialize)]
+struct CreateTagArgs {
+    name: String,
+    parent_id: Option<u32>,
+    color: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct SaveNoteArgs {
-    content: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct AddTodoArgs {
-    text: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct UpdateTodoArgs {
+struct UpdateTagArgs {
     id: u32,
-    completed: bool,
+    name: String,
+    color: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct RemoveTodoArgs {
+struct DeleteTagArgs {
     id: u32,
 }
 
 #[derive(Serialize, Deserialize)]
-struct SetTodoCountArgs {
+struct MoveTagArgs {
     id: u32,
-    count: Option<i32>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct DecrementTodoArgs {
-    id: u32,
+    new_parent_id: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct MoveTodoArgs {
-    id: u32,
-    target_parent_id: Option<u32>,
-    target_position: i32,
+struct AddFileTagArgs {
+    file_path: String,
+    tag_id: u32,
 }
 
 #[derive(Serialize, Deserialize)]
-struct LogArgs {
-    msg: String,
+struct RemoveFileTagArgs {
+    file_id: u32,
+    tag_id: u32,
 }
 
 #[derive(Serialize, Deserialize)]
-struct ResetAllArgs {}
+struct GetFileTagsArgs {
+    file_id: u32,
+}
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct WindowState {
-    width: f64,
-    height: f64,
-    x: f64,
-    y: f64,
-    pinned: bool,
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FilterFilesByTagsArgs {
+    tag_ids: Vec<u32>,
+    use_and_logic: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanFilesArgs {
+    root_path: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -97,981 +111,610 @@ struct SaveWindowStateArgs {
     pinned: bool,
 }
 
-fn render_todo_markdown(text: &str) -> String {
-    // 1. Pre-process: Replace custom color syntax with placeholders
-    // We use placeholders that won't be messed up by markdown parsing
-    // *r*red*r* -> %%COLOR_RED_START%%red%%COLOR_END%%
-    // We avoid __ because it's markdown for bold!
-    
-    let mut processed = text.to_string();
-    
-    // Red
-    if let Ok(re) = Regex::new(r"\*r\*(.*?)\*r\*") {
-        processed = re.replace_all(&processed, "%%COLOR_RED_START%%$1%%COLOR_END%%").to_string();
-    }
-    // Green
-    if let Ok(re) = Regex::new(r"\*g\*(.*?)\*g\*") {
-        processed = re.replace_all(&processed, "%%COLOR_GREEN_START%%$1%%COLOR_END%%").to_string();
-    }
-    // Blue
-    if let Ok(re) = Regex::new(r"\*b\*(.*?)\*b\*") {
-        processed = re.replace_all(&processed, "%%COLOR_BLUE_START%%$1%%COLOR_END%%").to_string();
-    }
+fn format_file_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
 
-    // 2. Parse Markdown to HTML
-    let parser = pulldown_cmark::Parser::new(&processed);
-    let mut html_output = String::new();
-    pulldown_cmark::html::push_html(&mut html_output, parser);
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
 
-    // 3. Post-process: Replace placeholders with actual HTML spans
-    // We remove the <p> tags that pulldown-cmark adds for single lines to keep it inline-like
-    // We also style headers manually since Tailwind resets them and we want them inline
-    let mut final_html = html_output
-        .replace("<p>", "")
-        .replace("</p>", "")
-        .replace("<h1>", "<span class=\"text-xl font-bold\">")
-        .replace("</h1>", "</span>")
-        .replace("<h2>", "<span class=\"text-lg font-bold\">")
-        .replace("</h2>", "</span>")
-        .replace("<h3>", "<span class=\"font-bold\">")
-        .replace("</h3>", "</span>")
-        .replace("%%COLOR_RED_START%%", "<span class=\"text-red-500\">")
-        .replace("%%COLOR_GREEN_START%%", "<span class=\"text-green-500\">")
-        .replace("%%COLOR_BLUE_START%%", "<span class=\"text-blue-500\">")
-        .replace("%%COLOR_END%%", "</span>");
-        
-    final_html
+fn format_timestamp(ts: i64) -> String {
+    // Completely avoid JavaScript Date API - just show raw timestamp or simple format
+    if ts <= 0 {
+        return "Unknown".to_string();
+    }
+    
+    // Calculate components from Unix timestamp
+    // This is 100% Rust, no JavaScript involved
+    const SECONDS_PER_MINUTE: i64 = 60;
+    const SECONDS_PER_HOUR: i64 = 3600;
+    const SECONDS_PER_DAY: i64 = 86400;
+    
+    let total_days = ts / SECONDS_PER_DAY;
+    let remaining_after_days = ts % SECONDS_PER_DAY;
+    let hours = remaining_after_days / SECONDS_PER_HOUR;
+    let remaining_after_hours = remaining_after_days % SECONDS_PER_HOUR;
+    let minutes = remaining_after_hours / SECONDS_PER_MINUTE;
+    let seconds = remaining_after_hours % SECONDS_PER_MINUTE;
+    
+    // Simple readable format without calling any JS Date methods
+    format!("{} days, {:02}:{:02}:{:02}", total_days, hours, minutes, seconds)
 }
 
 #[component]
 pub fn App() -> impl IntoView {
-    let (pinned, set_pinned) = signal(false);
-    let (content, set_content) = signal(String::new());
-    let (editing, set_editing) = signal(true);
-    let (todos, set_todos) = signal(Vec::<TodoItem>::new());
-    let (mode, set_mode) = signal("todo");
-    let (show_markdown_tip, set_show_markdown_tip) = signal(false);
-    
-    // Global drag state
-    let (dragging_id, set_dragging_id) = signal(None::<u32>);
-    let (drop_target_id, set_drop_target_id) = signal(None::<u32>);
-    let (drop_position, set_drop_position) = signal(0.5); // 0.0-1.0 for position detection
+    let (root_directory, set_root_directory) = signal(None::<String>);
+    let (scanned_files, set_scanned_files) = signal(Vec::<FileListItem>::new());
+    let (all_files, set_all_files) = signal(Vec::<FileInfo>::new());
+    let (all_tags, set_all_tags) = signal(Vec::<TagInfo>::new());
+    let (selected_tag_ids, set_selected_tag_ids) = signal(Vec::<u32>::new());
+    let (use_and_logic, set_use_and_logic) = signal(true);
+    let (displayed_files, set_displayed_files) = signal(Vec::<FileInfo>::new());
+    let (file_tags_map, set_file_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
+    let (selected_file_paths, set_selected_file_paths) = signal(Vec::<String>::new());
+    let (is_pinned, set_is_pinned) = signal(false);
+    let (scanning, set_scanning) = signal(false);
+    let (show_add_tag_dialog, set_show_add_tag_dialog) = signal(false);
+    let (new_tag_name, set_new_tag_name) = signal(String::new());
+    let (new_tag_parent, set_new_tag_parent) = signal(None::<u32>);
 
-    // Todo editing state
-    let (editing_todo_id, set_editing_todo_id) = signal(None::<u32>);
-
-    let log = move |msg: String| {
+    // Load initial state
+    Effect::new(move || {
         spawn_local(async move {
-            let args = serde_wasm_bindgen::to_value(&LogArgs { msg }).unwrap();
-            invoke("log_message", args).await;
-        });
-    };
+            // Load root directory
+            let root: Option<String> = serde_wasm_bindgen::from_value(
+                invoke("get_root_directory", JsValue::NULL).await
+            ).unwrap_or(None);
+            set_root_directory.set(root);
 
-    // Load initial data and window state
-    Effect::new(move |_| {
-        spawn_local(async move {
-            let saved_content: String =
-                serde_wasm_bindgen::from_value(invoke("load_note", JsValue::NULL).await)
-                    .unwrap_or_default();
-            set_content.set(saved_content);
+            // Load tags
+            load_tags(set_all_tags).await;
 
-            let saved_todos: Vec<TodoItem> =
-                serde_wasm_bindgen::from_value(invoke("load_todos", JsValue::NULL).await)
-                    .unwrap_or_default();
-            set_todos.set(saved_todos);
-            
-            // Load and apply window state
-            let window_state: Option<WindowState> =
-                serde_wasm_bindgen::from_value(invoke("load_window_state", JsValue::NULL).await)
-                    .ok()
-                    .flatten();
-            
-            if let Some(state) = window_state {
-                // Apply window size and position
-                let window = web_sys::window().unwrap();
-                let _ = window.resize_to(state.width as i32, state.height as i32);
-                let _ = window.move_to(state.x as i32, state.y as i32);
-                
-                // Apply pin state
-                set_pinned.set(state.pinned);
-                if state.pinned {
-                    let args = serde_wasm_bindgen::to_value(&SetAlwaysOnTopArgs {
-                        always_on_top: true,
-                    }).unwrap();
-                    invoke("set_always_on_top", args).await;
+            // Load all files
+            load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
+
+            // Load window state
+            let state_value = invoke("load_window_state", JsValue::NULL).await;
+            if let Ok(Some(state)) = serde_wasm_bindgen::from_value::<Option<serde_json::Value>>(state_value) {
+                if let Some(pinned) = state.get("pinned").and_then(|v| v.as_bool()) {
+                    set_is_pinned.set(pinned);
                 }
             }
         });
     });
 
-    let toggle_pin = move |_| {
+    let select_directory = move |_| {
         spawn_local(async move {
-            let new_pinned = !pinned.get_untracked();
-            let args = serde_wasm_bindgen::to_value(&SetAlwaysOnTopArgs {
-                always_on_top: new_pinned,
-            })
-            .unwrap();
-            invoke("set_always_on_top", args).await;
-            set_pinned.set(new_pinned);
+            let result: Result<String, String> = serde_wasm_bindgen::from_value(
+                invoke("select_root_directory", JsValue::NULL).await
+            ).unwrap_or(Err("Failed to select directory".to_string()));
             
-            // Save window state
-            let window = web_sys::window().unwrap();
-            let width = window.inner_width().unwrap().as_f64().unwrap_or(300.0);
-            let height = window.inner_height().unwrap().as_f64().unwrap_or(300.0);
-            let x = window.screen_x().ok().and_then(|v| v.as_f64()).unwrap_or(100.0);
-            let y = window.screen_y().ok().and_then(|v| v.as_f64()).unwrap_or(100.0);
-            
-            let save_args = serde_wasm_bindgen::to_value(&SaveWindowStateArgs {
-                width,
-                height,
-                x,
-                y,
-                pinned: new_pinned,
-            }).unwrap();
-            invoke("save_window_state", save_args).await;
+            if let Ok(path) = result {
+                set_root_directory.set(Some(path.clone()));
+                
+                // Automatically trigger scan after selecting directory
+                set_scanning.set(true);
+                web_sys::console::log_1(&"Auto-scanning after selection...".into());
+                let args = ScanFilesArgs { root_path: path };
+                
+                // Tauri unwraps Result automatically, so expect Vec<FileListItem> directly
+                let scan_result = match serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
+                    invoke("scan_files", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                ) {
+                    Ok(files) => {
+                        web_sys::console::log_1(&format!("Auto-scan success: {} files", files.len()).into());
+                        Some(files)
+                    },
+                    Err(e) => {
+                        web_sys::console::error_1(&format!("Auto-scan error: {:?}", e).into());
+                        None
+                    }
+                };
+
+                set_scanning.set(false);
+                if let Some(files) = scan_result {
+                    set_scanned_files.set(files);
+                }
+            }
+        });
+    };
+
+    let scan_directory = move |_| {
+        let root = root_directory.get();
+        if let Some(path) = root {
+            set_scanning.set(true);
+            spawn_local(async move {
+                web_sys::console::log_1(&"Invoking scan_files...".into());
+                let args = ScanFilesArgs { root_path: path };
+                
+                // Tauri unwraps Result automatically, so expect Vec<FileListItem> directly
+                let result = match serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
+                    invoke("scan_files", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                ) {
+                    Ok(files) => {
+                        web_sys::console::log_1(&format!("Scan success: {} files", files.len()).into());
+                        Some(files)
+                    },
+                    Err(e) => {
+                        web_sys::console::error_1(&format!("Scan error: {:?}", e).into());
+                        None
+                    }
+                };
+
+                set_scanning.set(false);
+                if let Some(files) = result {
+                    set_scanned_files.set(files);
+                }
+            });
+        }
+    };
+
+    let toggle_pin = move |_| {
+        let new_pinned = !is_pinned.get();
+        set_is_pinned.set(new_pinned);
+        spawn_local(async move {
+            let args = SetAlwaysOnTopArgs { always_on_top: new_pinned };
+            let _ = invoke("set_always_on_top", serde_wasm_bindgen::to_value(&args).unwrap()).await;
         });
     };
 
     let close = move |_| {
         spawn_local(async move {
-            invoke("close_window", JsValue::NULL).await;
+            let _ = invoke("close_window", JsValue::NULL).await;
         });
     };
 
-    /*
-    let toggle_edit = move |_| {
-        set_editing.update(|e| *e = !*e);
-    };
-    */
-
-    // Global mouseup handler for drag and drop
-    Effect::new(move |_| {
-        let window = web_sys::window().unwrap();
-        let log_clone = log.clone();
-        
-        let on_mouseup = Closure::<dyn FnMut(_)>::new(move |_ev: web_sys::MouseEvent| {
-            log_clone(format!("🔵 Global mouseup triggered"));
-            
-            if let Some(dragged_id) = dragging_id.get_untracked() {
-                log_clone(format!("🔵 Dragging ID: {}", dragged_id));
-                
-                if let Some(target_id) = drop_target_id.get_untracked() {
-                    log_clone(format!("🔵 Drop target ID: {}", target_id));
-                    
-                    if dragged_id != target_id {
-                        log_clone(format!("🟢 Drop {} on {}", dragged_id, target_id));
-                        
-                        // Get target todo info
-                        let pos: f64 = drop_position.get_untracked();
-                        let pos = pos.max(0.0).min(1.0); // Clamp to 0-1
-                        log_clone(format!("🔵 Drop position: {:.2}", pos));
-                        
-                        let current_todos = todos.get_untracked();
-                        
-                        // Log all todos for better debugging
-                        log_clone(format!("📋 All todos: {}", current_todos.iter()
-                            .map(|t| format!("id={} '{}' p={:?} pos={}", t.id, t.text, t.parent_id, t.position))
-                            .collect::<Vec<_>>()
-                            .join(", ")));
-                        
-                        let (final_parent, mut final_pos) = if let Some(target_todo) = current_todos.iter().find(|t| t.id == target_id) {
-                             log_clone(format!("📋 Target todo: id={} '{}' parent={:?} pos={}", target_todo.id, target_todo.text, target_todo.parent_id, target_todo.position));
-                             
-                             // Check if target is a descendant of dragged item (would create a cycle)
-                             // This must be checked BEFORE any position calculation
-                             let is_descendant = {
-                                 let mut check_id = Some(target_id);
-                                 let mut found = false;
-                                 while let Some(current_id) = check_id {
-                                     if current_id == dragged_id {
-                                         found = true;
-                                         break;
-                                     }
-                                     check_id = current_todos.iter()
-                                         .find(|t| t.id == current_id)
-                                         .and_then(|t| t.parent_id);
-                                 }
-                                 found
-                             };
-                             
-                             if is_descendant {
-                                 log_clone(format!("⚠️ Cannot drop parent into/near its own child/descendant, skipping"));
-                                 set_dragging_id.set(None);
-                                 set_drop_target_id.set(None);
-                                 return;
-                             }
-                             
-                             let target_parent_id = target_todo.parent_id;
-                             let target_position = target_todo.position;
-                             
-                             let pos: f64 = drop_position.get_untracked();
-                             let pos = pos.max(0.0).min(1.0);
-                             
-                             if pos < 0.25 {
-                                 log_clone(format!("📍 Dropping BEFORE (parent: {:?}, pos: {})", target_parent_id, target_position));
-                                 (target_parent_id, target_position)
-                             } else if pos > 0.75 {
-                                 log_clone(format!("📍 Dropping AFTER (parent: {:?}, pos: {})", target_parent_id, target_position + 1));
-                                 (target_parent_id, target_position + 1)
-                             } else {
-                                 log_clone(format!("📍 Dropping as CHILD (parent: {}, pos: 0)", target_id));
-                                 (Some(target_id), 0)
-                             }
-                        } else {
-                             log_clone(format!("❌ Target todo not found!"));
-                             return;
-                        };
-                            
-                            // Check if source and target are the same
-                            if let Some(dragged_todo) = current_todos.iter().find(|t| t.id == dragged_id) {
-                                log_clone(format!("📋 Dragged todo: id={} '{}' parent={:?} pos={}", dragged_todo.id, dragged_todo.text, dragged_todo.parent_id, dragged_todo.position));
-                                log_clone(format!("📋 Target: parent={:?}, pos={}", final_parent, final_pos));
-                                
-                                if dragged_todo.parent_id == final_parent && dragged_todo.position == final_pos {
-                                    log_clone(format!("⚠️ Source and target are the same, skipping"));
-                                    set_dragging_id.set(None);
-                                    set_drop_target_id.set(None);
-                                    return;
-                                }
-
-                                // Adjust position if dragging downwards in the same list
-                                // When we remove the item, indices shift, so we need to decrement the target position
-                                if dragged_todo.parent_id == final_parent && dragged_todo.position < final_pos {
-                                    log_clone(format!("⬇️ Dragging down in same list, adjusting pos from {} to {}", final_pos, final_pos - 1));
-                                    final_pos -= 1;
-                                }
-                            }
-                            
-                            // Log all todos for debugging
-                            log_clone(format!("📋 All todos: {}", current_todos.iter()
-                                .map(|t| format!("id={} p={:?} pos={}", t.id, t.parent_id, t.position))
-                                .collect::<Vec<_>>()
-                                .join(", ")));
-                            
-                            log_clone(format!("🚀 Calling move_todo_item..."));
-                            
-                            // Call backend
-                            let log_async = log_clone.clone();
-                            spawn_local(async move {
-                                let args = serde_wasm_bindgen::to_value(&MoveTodoArgs {
-                                    id: dragged_id,
-                                    target_parent_id: final_parent,
-                                    target_position: final_pos
-                                }).unwrap();
-                                
-                                log_async(format!("📤 Invoking backend with id={}, parent={:?}, pos={}", dragged_id, final_parent, final_pos));
-                                
-                                // Log to browser console for debugging
-                                web_sys::console::log_1(&JsValue::from_str(&format!("[JS] Calling move_todo_item with id={}, parent={:?}, pos={}", dragged_id, final_parent, final_pos)));
-                                
-                                // Call backend with error handling
-                                let result = invoke("move_todo_item", args).await;
-                                
-                                web_sys::console::log_2(&JsValue::from_str("[JS] invoke returned:"), &result);
-                                
-                                // Check if there was an error
-                                if result.is_undefined() || result.is_null() {
-                                    log_async(format!("✅ Backend call complete (void return)"));
-                                } else {
-                                    log_async(format!("✅ Backend call complete: {:?}", result));
-                                }
-                                
-                                // Reload todos
-                                log_async(format!("🔄 Reloading todos..."));
-                                let saved_todos: Vec<TodoItem> = serde_wasm_bindgen::from_value(
-                                    invoke("load_todos", JsValue::NULL).await
-                                ).unwrap_or_default();
-                                let count = saved_todos.len();
-                                set_todos.set(saved_todos);
-                                log_async(format!("✅ Todos reloaded, count: {}", count));
-                            });
-
-                    } else {
-                        log_clone(format!("⚠️ Dragging onto self, ignoring"));
-                    }
-                } else {
-                    log_clone(format!("⚠️ No drop target"));
-                }
-                // Clear drag state
-                set_dragging_id.set(None);
-                set_drop_target_id.set(None);
-            } else {
-                log_clone(format!("⚠️ No dragging ID"));
-            }
-        });
-        
-        let _ = window.add_event_listener_with_callback("mouseup", on_mouseup.as_ref().unchecked_ref());
-        on_mouseup.forget();
-    });
-
-    /*
-    let toggle_mode = move |_| {
-        set_mode.update(|m| *m = if *m == "note" { "todo" } else { "note" });
-    };
-    */
-
-    let update_note = move |ev| {
-        let val = event_target_value(&ev);
-        set_content.set(val.clone());
+    let start_drag = move |_| {
         spawn_local(async move {
-            let args = serde_wasm_bindgen::to_value(&SaveNoteArgs { content: val }).unwrap();
-            invoke("save_note_content", args).await;
+            let _ = invoke("start_drag", JsValue::NULL).await;
         });
     };
 
-    let add_todo = move |ev: SubmitEvent| {
-        ev.prevent_default();
-        let target = ev.target().unwrap();
-        let form = target.dyn_into::<web_sys::HtmlFormElement>().unwrap();
-        let input = form
-            .elements()
-            .named_item("todo-input")
-            .unwrap()
-            .dyn_into::<web_sys::HtmlInputElement>()
-            .unwrap();
-        let text = input.value();
-        if !text.is_empty() {
-            spawn_local(async move {
-                let args =
-                    serde_wasm_bindgen::to_value(&AddTodoArgs { text: text.clone() }).unwrap();
-                let id: u32 = serde_wasm_bindgen::from_value(invoke("add_todo_item", args).await)
-                    .unwrap_or(0);
-
-                if id != 0 {
-                    set_todos.update(|t| {
-                        t.push(TodoItem {
-                            id,
-                            text: text.clone(),
-                            completed: false,
-                            parent_id: None,
-                            position: 0,
-                            target_count: None,
-                            current_count: 0,
-                        })
-                    });
-                }
-            });
-            input.set_value("");
+    let toggle_tag_selection = move |tag_id: u32| {
+        let mut current = selected_tag_ids.get();
+        if let Some(pos) = current.iter().position(|&id| id == tag_id) {
+            current.remove(pos);
+        } else {
+            current.push(tag_id);
         }
+        set_selected_tag_ids.set(current.clone());
+        
+        // Filter files
+        filter_files(current, use_and_logic.get(), set_displayed_files, all_files.get());
     };
 
-    let toggle_todo = move |id: u32| {
-        // Optimistic update
-        set_todos.update(|t| {
-            if let Some(item) = t.iter_mut().find(|i| i.id == id) {
-                item.completed = !item.completed;
-            }
-        });
-
-        spawn_local(async move {
-            // Let's re-read the item to get the intended state
-            let completed = todos.get_untracked().iter().find(|i| i.id == id).map(|i| i.completed).unwrap_or(false);
-            
-            log(format!("🔄 Toggling todo {} to {}", id, completed));
-
-            let args = serde_wasm_bindgen::to_value(&UpdateTodoArgs { id, completed }).unwrap();
-            invoke("update_todo_status", args).await;
-            
-            // Reload todos to get cascading updates
-            log(format!("🔄 Reloading todos after toggle..."));
-            let saved_todos: Vec<TodoItem> = serde_wasm_bindgen::from_value(
-                invoke("load_todos", JsValue::NULL).await
-            ).unwrap_or_default();
-            set_todos.set(saved_todos);
-            log(format!("✅ Todos reloaded after toggle"));
-        });
+    let toggle_and_or = move |_| {
+        let new_logic = !use_and_logic.get();
+        set_use_and_logic.set(new_logic);
+        filter_files(selected_tag_ids.get(), new_logic, set_displayed_files, all_files.get());
     };
 
-    let delete_todo = move |id: u32| {
-        set_todos.update(|t| t.retain(|i| i.id != id));
-        spawn_local(async move {
-            let args = serde_wasm_bindgen::to_value(&RemoveTodoArgs { id }).unwrap();
-            invoke("remove_todo_item", args).await;
-        });
+    let show_all = move |_| {
+        set_selected_tag_ids.set(Vec::new());
+        set_displayed_files.set(all_files.get());
     };
 
-    let start_drag = move |ev: web_sys::MouseEvent| {
-        if pinned.get_untracked() {
-            return;
+    let toggle_file_selection = move |file_path: String| {
+        let mut current = selected_file_paths.get();
+        if let Some(pos) = current.iter().position(|p| p == &file_path) {
+            current.remove(pos);
+        } else {
+            current.push(file_path);
         }
-        if ev.buttons() == 1 {
+        set_selected_file_paths.set(current);
+    };
+
+    let add_tag_to_selected_files = move |tag_id: u32| {
+        let file_paths = selected_file_paths.get();
+        for file_path in file_paths {
             spawn_local(async move {
-                invoke("start_drag", JsValue::NULL).await;
+                let args = AddFileTagArgs { file_path, tag_id };
+                let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
             });
         }
-    };
-
-    let render_markdown = move || {
-        let markdown_input = content.get();
-        let parser = pulldown_cmark::Parser::new(&markdown_input);
-        let mut html_output = String::new();
-        pulldown_cmark::html::push_html(&mut html_output, parser);
-        html_output
-    };
-
-    let set_todo_count = move |id: u32, count: Option<i32>| {
+        // Reload file tags after adding
         spawn_local(async move {
-            let args = serde_wasm_bindgen::to_value(&SetTodoCountArgs { id, count }).unwrap();
-            invoke("set_todo_count", args).await;
-            // Reload todos
-            let saved_todos: Vec<TodoItem> = serde_wasm_bindgen::from_value(
-                invoke("load_todos", JsValue::NULL).await
-            ).unwrap_or_default();
-            set_todos.set(saved_todos);
+            load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
         });
     };
 
-    let decrement_todo = move |id: u32| {
-        spawn_local(async move {
-            let args = serde_wasm_bindgen::to_value(&DecrementTodoArgs { id }).unwrap();
-            invoke("decrement_todo", args).await;
-            // Reload todos
-            let saved_todos: Vec<TodoItem> = serde_wasm_bindgen::from_value(
-                invoke("load_todos", JsValue::NULL).await
-            ).unwrap_or_default();
-            set_todos.set(saved_todos);
-        });
-    };
-
-    let reset_all_todos = move |_| {
-        spawn_local(async move {
-            // Call backend to reset all todos
-            invoke("reset_all_todos", JsValue::NULL).await;
-            // Reload todos
-            let saved_todos: Vec<TodoItem> = serde_wasm_bindgen::from_value(
-                invoke("load_todos", JsValue::NULL).await
-            ).unwrap_or_default();
-            set_todos.set(saved_todos);
-        });
-    };
-
-
-
-    let update_todo_text = move |id: u32, text: String| {
-        spawn_local(async move {
-            let args = serde_wasm_bindgen::to_value(&UpdateTodoTextArgs { id, text }).unwrap();
-            invoke("update_todo_text", args).await;
-            // Reload todos
-            let saved_todos: Vec<TodoItem> = serde_wasm_bindgen::from_value(
-                invoke("load_todos", JsValue::NULL).await
-            ).unwrap_or_default();
-            set_todos.set(saved_todos);
-        });
+    let create_tag_action = move |_| {
+        let name = new_tag_name.get();
+        let parent = new_tag_parent.get();
+        if !name.is_empty() {
+            spawn_local(async move {
+                let args = CreateTagArgs { name, parent_id: parent, color: None };
+                let _ = invoke("create_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                load_tags(set_all_tags).await;
+                set_show_add_tag_dialog.set(false);
+                set_new_tag_name.set(String::new());
+                set_new_tag_parent.set(None);
+            });
+        }
     };
 
     view! {
-        <main class="h-screen w-screen bg-yellow-100 flex flex-col overflow-hidden rounded-lg shadow-lg border border-yellow-300">
-            <div
-                class="h-8 bg-yellow-200 flex justify-between items-center px-2 cursor-move select-none"
-                on:mousedown=start_drag
-            >
-                <span class="text-xs text-yellow-800 font-bold pointer-events-none">"TodoList"</span>
-                <div class="flex gap-1">
-                    <button
-                        on:click=reset_all_todos
-                        on:mousedown=move |ev| ev.stop_propagation()
-                        class="px-2 py-0.5 text-xs rounded hover:bg-yellow-300 text-yellow-700 transition-colors"
-                        title="Reset all items to incomplete"
-                    >
-                        "↻"
+        <div class="app">
+            <div class="header" on:mousedown=move |e| {
+                // Only start drag if not clicking on buttons
+                let target = e.target();
+                if let Some(element) = target.and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                    let tag_name = element.tag_name().to_lowercase();
+                    if tag_name != "button" {
+                        start_drag(e);
+                    }
+                }
+            }>
+                <h1>"TagMe"</h1>
+                <div class="header-buttons">
+                    <button on:click=toggle_pin class="header-btn" title="Pin">
+                        {move || if is_pinned.get() { "📌" } else { "📍" }}
                     </button>
-                    /*
-                    <button
-                        on:click=toggle_mode
-                        on:mousedown=move |ev| ev.stop_propagation()
-                        class="p-1 rounded hover:bg-yellow-300 text-yellow-600 transition-colors text-xs"
-                    >
-                        {move || if mode.get() == "note" { "📝" } else { "✅" }}
-                    </button>
-                    {move || if mode.get() == "note" {
-                        view! {
-                            <button
-                                on:click=toggle_edit
-                                on:mousedown=move |ev| ev.stop_propagation()
-                                class="p-1 rounded hover:bg-yellow-300 text-yellow-600 transition-colors"
-                            >
-                                {move || if editing.get() { "👁️" } else { "✏️" }}
-                            </button>
-                        }.into_any()
-                    } else {
-                        view! { <span class="w-6"></span> }.into_any()
-                    }}
-                    */
-                    <button
-                        on:click=toggle_pin
-                        on:mousedown=move |ev| ev.stop_propagation()
-                        class=move || format!("p-1 rounded hover:bg-yellow-300 transition-colors {}", if pinned.get() { "text-red-600" } else { "text-yellow-600" })
-                    >
-                        {move || if pinned.get() { "📌" } else { "📍" }}
-                    </button>
-                    <button
-                        on:click=close
-                        on:mousedown=move |ev| ev.stop_propagation()
-                        class="p-1 rounded hover:bg-red-400 hover:text-white text-yellow-600 transition-colors"
-                    >
-                        "✕"
-                    </button>
+                    <button on:click=close class="header-btn" title="Close">"×"</button>
                 </div>
             </div>
 
-            <div class="flex-1 p-2 overflow-auto">
-                {move || if mode.get() == "note" {
-                    if editing.get() {
-                        view! {
-                            <textarea
-                                class="w-full h-full bg-transparent resize-none outline-none text-gray-800 font-sans text-sm"
-                                placeholder="Type your note here..."
-                                on:input=update_note
-                                prop:value=content
-                            ></textarea>
-                        }.into_any()
-                    } else {
-                        view! {
-                            <div
-                                class="prose prose-sm max-w-none text-gray-800 prose-p:my-1 prose-headings:my-2"
-                                inner_html=render_markdown()
-                            ></div>
-                        }.into_any()
-                    }.into_any()
-                } else {
-                    view! {
-                        <div class="flex flex-col h-full">
-                            <form on:submit=add_todo class="flex gap-2 mb-2 relative">
-                                <div 
-                                    class=move || format!(
-                                        "absolute top-full left-0 mt-1 w-64 bg-white backdrop-blur-sm rounded-lg shadow-xl border border-gray-200 p-3 text-xs z-[9999] transition-all duration-200 transform origin-top {}",
-                                        if show_markdown_tip.get() { "opacity-90 scale-100" } else { "opacity-0 scale-95 pointer-events-none" }
-                                    )
-                                >
-                                    <div class="font-bold text-gray-700 mb-2 border-b pb-1">"Markdown Tips"</div>
-                                    <div class="grid grid-cols-[1fr,auto,1fr] gap-x-2 gap-y-1 items-center">
-                                        <code class="bg-gray-100 px-1 rounded text-gray-600">"## Title"</code>
-                                        <span class="text-gray-400">"→"</span>
-                                        <span class="text-lg font-bold">"Title"</span>
-                                        
-                                        <code class="bg-gray-100 px-1 rounded text-gray-600">"**Bold**"</code>
-                                        <span class="text-gray-400">"→"</span>
-                                        <strong>"Bold"</strong>
-                                        
-                                        <code class="bg-gray-100 px-1 rounded text-gray-600">"*Italic*"</code>
-                                        <span class="text-gray-400">"→"</span>
-                                        <em>"Italic"</em>
-                                        
-                                        <code class="bg-gray-100 px-1 rounded text-gray-600">"*r*Red*r*"</code>
-                                        <span class="text-gray-400">"→"</span>
-                                        <span class="text-red-500">"Red"</span>
-                                        
-                                        <code class="bg-gray-100 px-1 rounded text-gray-600">"*g*Green*g*"</code>
-                                        <span class="text-gray-400">"→"</span>
-                                        <span class="text-green-500">"Green"</span>
-                                        
-                                        <code class="bg-gray-100 px-1 rounded text-gray-600">"*b*Blue*b*"</code>
-                                        <span class="text-gray-400">"→"</span>
-                                        <span class="text-blue-500">"Blue"</span>
-                                    </div>
-                                    <div class="absolute top-0 left-4 transform -translate-y-1/2 rotate-45 w-2 h-2 border-l border-t border-gray-200" style="background-color: rgba(255, 255, 255, 0.95);"></div>
-                                </div>
-
-                                <input
-                                    name="todo-input"
-                                    class="flex-1 bg-white/50 border-none rounded px-2 py-1 text-sm outline-none focus:bg-white"
-                                    placeholder="Add todo... (Markdown supported)"
-                                    autocomplete="off"
-                                    on:focus=move |_| set_show_markdown_tip.set(true)
-                                    on:blur=move |_| set_show_markdown_tip.set(false)
-                                />
-                                <button type="submit" class="text-green-600 hover:text-green-700 font-bold">"+"</button>
-                            </form>
-                            <div class="flex-col gap-1 overflow-auto">
-                                <TodoList
-                                    todos=todos.into()
-                                    parent_id=None
-                                    toggle_todo=toggle_todo
-                                    delete_todo=delete_todo
-                                    log=log
-                                    on_drop=move |dragged_id, target_parent_id, target_pos| {
-                                        log(format!("Dropped {} -> {:?}", dragged_id, target_parent_id));
-                                        spawn_local(async move {
-                                            let args = serde_wasm_bindgen::to_value(&MoveTodoArgs {
-                                                id: dragged_id,
-                                                target_parent_id,
-                                                target_position: target_pos
-                                            }).unwrap();
-                                            invoke("move_todo_item", args).await;
-                                            let saved_todos: Vec<TodoItem> = serde_wasm_bindgen::from_value(
-                                                invoke("load_todos", JsValue::NULL).await
-                                            ).unwrap_or_default();
-                                            set_todos.set(saved_todos);
-                                        });
-                                    }
-                                    dragging_id=dragging_id
-                                    set_dragging_id=set_dragging_id
-                                    drop_target_id=drop_target_id
-                                    set_drop_target_id=set_drop_target_id
-                                    drop_position=drop_position
-                                    set_drop_position=set_drop_position
-                                    set_todo_count=set_todo_count
-                                    decrement_todo=decrement_todo
-                                    editing_todo_id=editing_todo_id
-                                    set_editing_todo_id=set_editing_todo_id
-                                    update_todo_text=update_todo_text
-                                />
-
-                            </div>
-                        </div>
-                    }.into_any()
-                }}
+            <div class="toolbar">
+                <button on:click=select_directory>"Select Root Directory"</button>
+                {move || root_directory.get().map(|path| view! {
+                    <span class="root-path">{path}</span>
+                })}
+                <button on:click=scan_directory disabled=move || root_directory.get().is_none()>
+                    {move || if scanning.get() { "Scanning..." } else { "Scan Files" }}
+                </button>
             </div>
-        </main>
+
+            <div class="main-content">
+                <div class="left-panel">
+                    <div class="panel-header">
+                        <h2>"Tags"</h2>
+                        <button on:click=move |_| set_show_add_tag_dialog.set(true)>"+"</button>
+                    </div>
+                    <TagTree
+                        tags=all_tags
+                        selected_tag_ids=selected_tag_ids
+                        on_toggle=toggle_tag_selection
+                    />
+                </div>
+
+                <div class="right-panel">
+                    <div class="panel-header">
+                        <h2>"Files"</h2>
+                        <div class="file-controls">
+                            <button on:click=show_all>"Show All"</button>
+                            <button on:click=toggle_and_or>
+                                {move || if use_and_logic.get() { "Filter: AND" } else { "Filter: OR" }}
+                            </button>
+                        </div>
+                    </div>
+                    <FileList
+                        scanned_files=scanned_files
+                        db_files=displayed_files
+                        file_tags_map=file_tags_map
+                        selected_file_paths=selected_file_paths
+                        on_toggle=toggle_file_selection
+                        all_tags=all_tags
+                        on_add_tag=add_tag_to_selected_files
+                    />
+                </div>
+            </div>
+
+            {move || show_add_tag_dialog.get().then(|| view! {
+                <div class="modal-overlay" on:click=move |_| set_show_add_tag_dialog.set(false)>
+                    <div class="modal" on:click=|e| e.stop_propagation()>
+                        <h3>"Add New Tag"</h3>
+                        <input
+                            type="text"
+                            placeholder="Tag name"
+                            prop:value=new_tag_name
+                            on:input=move |e| set_new_tag_name.set(event_target_value(&e))
+                        />
+                        <button on:click=create_tag_action>"Create"</button>
+                        <button on:click=move |_| set_show_add_tag_dialog.set(false)>"Cancel"</button>
+                    </div>
+                </div>
+            })}
+        </div>
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct UpdateTodoTextArgs {
-    id: u32,
-    text: String,
-}
-
 #[component]
-fn TodoList<F1, F2, F3, F4, F5, F6, F7>(
-    todos: Signal<Vec<TodoItem>>,
-    parent_id: Option<u32>,
-    toggle_todo: F1,
-    delete_todo: F2,
-    log: F4,
-    on_drop: F3,
-    dragging_id: ReadSignal<Option<u32>>,
-    set_dragging_id: WriteSignal<Option<u32>>,
-    drop_target_id: ReadSignal<Option<u32>>,
-    set_drop_target_id: WriteSignal<Option<u32>>,
-    drop_position: ReadSignal<f64>,
-    set_drop_position: WriteSignal<f64>,
-    set_todo_count: F5,
-    decrement_todo: F6,
-    editing_todo_id: ReadSignal<Option<u32>>,
-    set_editing_todo_id: WriteSignal<Option<u32>>,
-    update_todo_text: F7,
-) -> impl IntoView
-where
-    F1: Fn(u32) + Clone + Send + 'static,
-    F2: Fn(u32) + Clone + Send + 'static,
-    F3: Fn(u32, Option<u32>, i32) + Clone + Send + 'static,
-    F4: Fn(String) + Clone + Send + 'static,
-    F5: Fn(u32, Option<i32>) + Clone + Send + 'static,
-    F6: Fn(u32) + Clone + Send + 'static,
-    F7: Fn(u32, String) + Clone + Send + 'static,
-{
+fn TagTree(
+    tags: ReadSignal<Vec<TagInfo>>,
+    selected_tag_ids: ReadSignal<Vec<u32>>,
+    on_toggle: impl Fn(u32) + 'static + Copy + Send,
+) -> impl IntoView {
+    let root_tags = move || {
+        tags.get()
+            .into_iter()
+            .filter(|t| t.parent_id.is_none())
+            .collect::<Vec<_>>()
+    };
 
     view! {
-        <ul class="flex flex-col gap-2 pl-4 border-l-2 border-gray-100">
+        <div class="tag-tree">
             <For
-                each=move || {
-                    todos.get()
-                        .into_iter()
-                        .filter(|t| t.parent_id == parent_id)
-                        .collect::<Vec<_>>()
-                }
-                key=|todo| todo.id
-                children=move |todo| {
+                each=root_tags
+                key=|tag| tag.id
+                children=move |tag| {
                     view! {
-                        <TodoItemView 
-                            todo=todo 
-                            all_todos=todos
-                            toggle_todo=toggle_todo.clone() 
-                            delete_todo=delete_todo.clone() 
-                            log=log.clone() 
-                            on_drop=on_drop.clone()
-                            dragging_id=dragging_id
-                            set_dragging_id=set_dragging_id
-                            drop_target_id=drop_target_id
-                            set_drop_target_id=set_drop_target_id
-                            drop_position=drop_position
-                            set_drop_position=set_drop_position
-                            set_todo_count=set_todo_count.clone()
-                            decrement_todo=decrement_todo.clone()
-                            editing_todo_id=editing_todo_id
-                            set_editing_todo_id=set_editing_todo_id
-                            update_todo_text=update_todo_text.clone()
+                        <TagNode
+                            tag=tag
+                            all_tags=tags
+                            selected_tag_ids=selected_tag_ids
+                            on_toggle=on_toggle
+                            level=0
                         />
                     }
                 }
             />
-        </ul>
+        </div>
     }
 }
 
 #[component]
-fn TodoItemView<F1, F2, F3, F4, F5, F6, F7>(
-    todo: TodoItem,
-    all_todos: Signal<Vec<TodoItem>>,
-    toggle_todo: F1,
-    delete_todo: F2,
-    log: F4,
-    on_drop: F3,
-    dragging_id: ReadSignal<Option<u32>>,
-    set_dragging_id: WriteSignal<Option<u32>>,
-    drop_target_id: ReadSignal<Option<u32>>,
-    set_drop_target_id: WriteSignal<Option<u32>>,
-    drop_position: ReadSignal<f64>,
-    set_drop_position: WriteSignal<f64>,
-    set_todo_count: F5,
-    decrement_todo: F6,
-    editing_todo_id: ReadSignal<Option<u32>>,
-    set_editing_todo_id: WriteSignal<Option<u32>>,
-    update_todo_text: F7,
-) -> AnyView
-where
-    F1: Fn(u32) + Clone + Send + 'static,
-    F2: Fn(u32) + Clone + Send + 'static,
-    F3: Fn(u32, Option<u32>, i32) + Clone + Send + 'static,
-    F4: Fn(String) + Clone + Send + 'static,
-    F5: Fn(u32, Option<i32>) + Clone + Send + 'static,
-    F6: Fn(u32) + Clone + Send + 'static,
-    F7: Fn(u32, String) + Clone + Send + 'static,
-{
-    let id = todo.id;
-    
-    // Create a derived signal for the current todo to ensure reactivity
-    // This fixes the issue where the component doesn't update when the parent list changes
-    let current_todo = Memo::new(move |_| {
-        all_todos.get()
+fn TagNode(
+    tag: TagInfo,
+    all_tags: ReadSignal<Vec<TagInfo>>,
+    selected_tag_ids: ReadSignal<Vec<u32>>,
+    on_toggle: impl Fn(u32) + 'static + Copy + Send,
+    level: usize,
+) -> AnyView {
+    let tag_id = tag.id;
+    let children = move || {
+        all_tags.get()
             .into_iter()
-            .find(|t| t.id == id)
-            .unwrap_or(todo.clone())
-    });
-
-    // Mouse down - start drag
-    let on_mousedown = {
-        let log = log.clone();
-        move |ev: web_sys::MouseEvent| {
-            if ev.button() == 0 { // Left click only
-                set_dragging_id.set(Some(id));
-                log(format!("Start dragging: {}", id));
-                ev.prevent_default();
-                ev.stop_propagation();
-            }
-        }
+            .filter(move |t| t.parent_id == Some(tag_id))
+            .collect::<Vec<_>>()
     };
 
-    // Mouse enter - track potential drop target
-    let update_position = move |ev: &web_sys::MouseEvent| {
-        if dragging_id.get_untracked().is_some() {
-            set_drop_target_id.set(Some(id));
-            
-            // Calculate relative position (0.0 = top, 1.0 = bottom)
-            if let Some(target) = ev.current_target() {
-                if let Some(element) = target.dyn_ref::<web_sys::HtmlElement>() {
-                    let rect = element.get_bounding_client_rect();
-                    let y = ev.client_y() as f64;
-                    let top = rect.top();
-                    let height = rect.height();
-                    
-                    if height > 0.0 {
-                        let relative_y = ((y - top) / height).max(0.0).min(1.0);
-                        set_drop_position.set(relative_y);
-                    }
-                }
-            }
-        }
-    };
-
-    let on_mouseenter = {
-        let update_position = update_position.clone();
-        move |ev: web_sys::MouseEvent| {
-            update_position(&ev);
-        }
-    };
-
-    let on_mousemove = {
-        let update_position = update_position.clone();
-        move |ev: web_sys::MouseEvent| {
-            update_position(&ev);
-            ev.stop_propagation();
-        }
-    };
-
-    // Visual feedback based on drag state
-    let item_class = move || {
-        let mut classes = vec![
-            "flex flex-col p-2 rounded shadow-sm border transition-all duration-200 select-none".to_string(),
-            "bg-white".to_string(),
-        ];
-
-        if dragging_id.get() == Some(id) {
-            classes.push("opacity-50 scale-95 ring-2 ring-blue-400".to_string());
-        }
-
-        if drop_target_id.get() == Some(id) {
-            let pos = drop_position.get();
-            if pos < 0.25 {
-                // Dropping BEFORE - blue top border
-                classes.push("border-t-4".to_string());
-                classes.push("border-blue-500".to_string());
-            } else if pos > 0.75 {
-                // Dropping AFTER - blue bottom border
-                classes.push("border-b-4".to_string());
-                classes.push("border-blue-500".to_string());
-            } else {
-                // Dropping as CHILD - amber/yellow background with ring for visibility
-                classes.push("bg-amber-100".to_string());
-                classes.push("ring-2".to_string());
-                classes.push("ring-amber-400".to_string());
-                classes.push("border-amber-300".to_string());
-            }
-        } else {
-            classes.push("hover:bg-yellow-50".to_string());
-        }
-        
-        classes.join(" ")
-    };
-
-    let is_editing = move || editing_todo_id.get() == Some(id);
-
-    let save_edit = {
-        let update_todo_text = update_todo_text.clone();
-        move |new_text: String| {
-            update_todo_text(id, new_text);
-            set_editing_todo_id.set(None);
-        }
-    };
+    let is_selected = move || selected_tag_ids.get().contains(&tag_id);
+    let has_children = move || !children().is_empty();
 
     view! {
-        <li 
-            class=item_class
-            on:mousedown=on_mousedown
-            on:mouseenter=on_mouseenter
-            on:mousemove=on_mousemove
-        >
-            <div class="flex items-center gap-2 select-none">
-                <span class="text-gray-400 cursor-grab">"⠿"</span>
-                
-                {
-                    let toggle_todo = toggle_todo.clone();
-                    let decrement_todo = decrement_todo.clone();
-                    move || {
-                    let t = current_todo.get();
-                    let is_countdown = t.target_count.unwrap_or(0) > 0;
-                    
-                    if is_countdown && !t.completed {
-                        view! {
-                            <button
-                                class="w-6 h-6 flex items-center justify-center bg-blue-100 text-blue-600 rounded-full text-xs font-bold hover:bg-blue-200 transition-colors"
-                                on:click={
-                                    let dec = decrement_todo.clone();
-                                    move |ev| {
-                                        ev.stop_propagation();
-                                        dec(id);
-                                    }
-                                }
-                                on:mousedown=move |ev| ev.stop_propagation()
-                            >
-                                {t.current_count}
-                            </button>
-                        }.into_any()
-                    } else {
-                        view! {
-                            <input 
-                                type="checkbox" 
-                                prop:checked=move || current_todo.get().completed 
-                                on:change={
-                                    let toggle = toggle_todo.clone();
-                                    move |_| toggle(id)
-                                }
-                                on:mousedown=move |ev| ev.stop_propagation()
-                                class="cursor-pointer" 
-                            />
-                        }.into_any()
-                    }
-                }}
-
-                {move || {
-                    if is_editing() {
-                        let save_edit_blur = save_edit.clone();
-                        let save_edit_keydown = save_edit.clone();
-                        view! {
-                            <input
-                                type="text"
-                                class="flex-1 bg-yellow-50 border border-yellow-300 rounded px-1 py-0.5 text-sm outline-none focus:ring-1 focus:ring-yellow-500"
-                                prop:value=current_todo.get().text
-                                on:blur=move |ev| {
-                                    let input_element = event_target::<web_sys::HtmlInputElement>(&ev);
-                                    save_edit_blur(input_element.value());
-                                }
-                                on:keydown=move |ev| {
-                                    if ev.key() == "Enter" {
-                                        let input_element = event_target::<web_sys::HtmlInputElement>(&ev);
-                                        save_edit_keydown(input_element.value());
-                                    } else if ev.key() == "Escape" {
-                                        set_editing_todo_id.set(None);
-                                    }
-                                }
-                                on:mousedown=move |ev| ev.stop_propagation()
-                                on:click=move |ev| ev.stop_propagation()
-                                autofocus
-                            />
-                        }.into_any()
-                    } else {
-                        view! {
-                            <span 
-                                class=move || format!(
-                                    "flex-1 text-sm {}", 
-                                    if current_todo.get().completed { "line-through text-gray-500" } else { "text-gray-800" }
-                                )
-                                inner_html=move || render_todo_markdown(&current_todo.get().text)
-                                on:dblclick=move |_| set_editing_todo_id.set(Some(id))
-                            >
-                            </span>
-                        }.into_any()
-                    }
-                }}
-
+        <div class="tag-node" style=format!("margin-left: {}px", level * 20)>
+            <label class="tag-label">
                 <input
-                    type="number"
-                    class="w-12 p-1 text-xs border rounded text-center text-gray-500"
-                    placeholder="#"
-                    prop:value=move || current_todo.get().target_count.map(|c| c.to_string()).unwrap_or_default()
-                    on:change={
-                        let set_count = set_todo_count.clone();
-                        move |ev| {
-                            let input = event_target::<web_sys::HtmlInputElement>(&ev);
-                            let val = input.value();
-                            let count = val.parse::<i32>().ok().filter(|&c| c > 0);
-                            set_count(id, count);
-                        }
-                    }
-                    on:mousedown=move |ev: MouseEvent| ev.stop_propagation()
-                    on:click=move |ev: MouseEvent| ev.stop_propagation()
+                    type="checkbox"
+                    checked=is_selected
+                    on:change=move |_| on_toggle(tag_id)
                 />
-
-                <button 
-                    on:click={
-                        let del = delete_todo.clone();
-                        move |_| del(id)
-                    }
-                    class="text-red-400 hover:text-red-600 text-xs"
-                    on:mousedown=move |ev: MouseEvent| ev.stop_propagation()
-                >"×"</button>
-            </div>
-            <TodoList 
-                todos=all_todos 
-                parent_id=Some(id) 
-                toggle_todo=toggle_todo 
-                delete_todo=delete_todo 
-                log=log 
-                on_drop=on_drop
-                dragging_id=dragging_id
-                set_dragging_id=set_dragging_id
-                drop_target_id=drop_target_id
-                set_drop_target_id=set_drop_target_id
-                drop_position=drop_position
-                set_drop_position=set_drop_position
-                set_todo_count=set_todo_count
-                decrement_todo=decrement_todo
-                editing_todo_id=editing_todo_id
-                set_editing_todo_id=set_editing_todo_id
-                update_todo_text=update_todo_text
-            />
-        </li>
+                <span class="tag-name" style=move || tag.color.clone().map(|c| format!("color: {}", c)).unwrap_or_default()>
+                    {tag.name.clone()}
+                </span>
+            </label>
+            {move || has_children().then(|| view! {
+                <div class="tag-children">
+                    <For
+                        each=children
+                        key=|t| t.id
+                        children=move |child| {
+                            view! {
+                                <TagNode
+                                    tag=child
+                                    all_tags=all_tags
+                                    selected_tag_ids=selected_tag_ids
+                                    on_toggle=on_toggle
+                                    level=level + 1
+                                />
+                            }
+                        }
+                    />
+                </div>
+            })}
+        </div>
     }.into_any()
 }
 
+#[component]
+fn FileList(
+    scanned_files: ReadSignal<Vec<FileListItem>>,
+    db_files: ReadSignal<Vec<FileInfo>>,
+    file_tags_map: ReadSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
+    selected_file_paths: ReadSignal<Vec<String>>,
+    on_toggle: impl Fn(String) + 'static + Copy + Send,
+    all_tags: ReadSignal<Vec<TagInfo>>,
+    on_add_tag: impl Fn(u32) + 'static + Copy + Send,
+) -> impl IntoView {
+    view! {
+        <div class="file-list">
+            <table>
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>"File Path"</th>
+                        <th>"Size"</th>
+                        <th>"Modified"</th>
+                        <th>"Tags"</th>
+                        <th>"Add Tag"</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    // Show scanned files first (not yet in DB)
+                    <For
+                        each=move || scanned_files.get()
+                        key=|file| file.path.clone()
+                        children=move |file| {
+                            let file_path = file.path.clone();
+                            let file_path_for_toggle = file_path.clone();
+                            let file_path_for_class = file_path.clone();
+                            let file_path_for_checked = file_path.clone();
+                            
+                            view! {
+                                <tr class:selected=move || selected_file_paths.get().contains(&file_path_for_class)>
+                                    <td>
+                                        <input
+                                            type="checkbox"
+                                            checked=move || selected_file_paths.get().contains(&file_path_for_checked)
+                                            on:change=move |_| on_toggle(file_path_for_toggle.clone())
+                                        />
+                                    </td>
+                                    <td class="file-path" title=file.path.clone()>{file.path.clone()}</td>
+                                    <td>{format_file_size(file.size_bytes)}</td>
+                                    <td>{format_timestamp(file.last_modified)}</td>
+                                    <td class="file-tags">
+                                        <span class="not-in-db">"Not tagged yet"</span>
+                                    </td>
+                                    <td>
+                                        <select on:change=move |e| {
+                                            if let Ok(tag_id) = event_target_value(&e).parse::<u32>() {
+                                                on_add_tag(tag_id);
+                                            }
+                                        }>
+                                            <option value="">"Add tag..."</option>
+                                            <For
+                                                each=move || all_tags.get()
+                                                key=|tag| tag.id
+                                                children=move |tag| {
+                                                    view! {
+                                                        <option value=tag.id.to_string()>{tag.name.clone()}</option>
+                                                    }
+                                                }
+                                            />
+                                        </select>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    />
+                    
+                    // Show DB files (already tagged)
+                    <For
+                        each=move || db_files.get()
+                        key=|file| file.id
+                        children=move |file| {
+                            let file_path = file.path.clone();
+                            let file_path_for_toggle = file_path.clone();
+                            let file_path_for_class = file_path.clone();
+                            let file_path_for_checked = file_path.clone();
+                            let file_id = file.id;
+                            let file_tags = move || file_tags_map.get().get(&file_id).cloned().unwrap_or_default();
+                            
+                            view! {
+                                <tr class:selected=move || selected_file_paths.get().contains(&file_path_for_class)>
+                                    <td>
+                                        <input
+                                            type="checkbox"
+                                            checked=move || selected_file_paths.get().contains(&file_path_for_checked)
+                                            on:change=move |_| on_toggle(file_path_for_toggle.clone())
+                                        />
+                                    </td>
+                                    <td class="file-path" title=file.path.clone()>{file.path.clone()}</td>
+                                    <td>{format_file_size(file.size_bytes)}</td>
+                                    <td>{format_timestamp(file.last_modified)}</td>
+                                    <td class="file-tags">
+                                        <For
+                                            each=file_tags
+                                            key=|tag| tag.id
+                                            children=move |tag| {
+                                                view! {
+                                                    <span class="tag-badge" style=move || tag.color.clone().map(|c| format!("background-color: {}", c)).unwrap_or_default()>
+                                                        {tag.name.clone()}
+                                                    </span>
+                                                }
+                                            }
+                                        />
+                                    </td>
+                                    <td>
+                                        <select on:change=move |e| {
+                                            if let Ok(tag_id) = event_target_value(&e).parse::<u32>() {
+                                                on_add_tag(tag_id);
+                                            }
+                                        }>
+                                            <option value="">"Add tag..."</option>
+                                            <For
+                                                each=move || all_tags.get()
+                                                key=|tag| tag.id
+                                                children=move |tag| {
+                                                    view! {
+                                                        <option value=tag.id.to_string()>{tag.name.clone()}</option>
+                                                    }
+                                                }
+                                            />
+                                        </select>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    />
+                </tbody>
+            </table>
+        </div>
+    }
+}
+
+// Helper functions
+async fn load_tags(set_all_tags: WriteSignal<Vec<TagInfo>>) {
+    let result: Result<Vec<TagInfo>, String> = serde_wasm_bindgen::from_value(
+        invoke("get_all_tags", JsValue::NULL).await
+    ).unwrap_or(Ok(Vec::new()));
+    
+    if let Ok(tags) = result {
+        set_all_tags.set(tags);
+    }
+}
+
+async fn load_all_files(
+    set_all_files: WriteSignal<Vec<FileInfo>>,
+    set_displayed_files: WriteSignal<Vec<FileInfo>>,
+    set_file_tags_map: WriteSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
+) {
+    let result: Result<Vec<FileInfo>, String> = serde_wasm_bindgen::from_value(
+        invoke("get_all_files", JsValue::NULL).await
+    ).unwrap_or(Ok(Vec::new()));
+    
+    if let Ok(files) = result {
+        // Load tags for each file
+        let mut tags_map = std::collections::HashMap::new();
+        for file in &files {
+            let file_id = file.id;
+            let args = GetFileTagsArgs { file_id };
+            let tags_result: Result<Vec<TagInfo>, String> = serde_wasm_bindgen::from_value(
+                invoke("get_file_tags", serde_wasm_bindgen::to_value(&args).unwrap()).await
+            ).unwrap_or(Ok(Vec::new()));
+            
+            if let Ok(tags) = tags_result {
+                tags_map.insert(file_id, tags);
+            }
+        }
+        
+        set_file_tags_map.set(tags_map);
+        set_all_files.set(files.clone());
+        set_displayed_files.set(files);
+    }
+}
+
+fn filter_files(
+    tag_ids: Vec<u32>,
+    use_and: bool,
+    set_displayed_files: WriteSignal<Vec<FileInfo>>,
+    all_files: Vec<FileInfo>,
+) {
+    if tag_ids.is_empty() {
+        set_displayed_files.set(all_files);
+        return;
+    }
+
+    spawn_local(async move {
+        let args = FilterFilesByTagsArgs {
+            tag_ids,
+            use_and_logic: use_and,
+        };
+        let result: Result<Vec<FileInfo>, String> = serde_wasm_bindgen::from_value(
+            invoke("filter_files_by_tags", serde_wasm_bindgen::to_value(&args).unwrap()).await
+        ).unwrap_or(Ok(Vec::new()));
+        
+        if let Ok(files) = result {
+            set_displayed_files.set(files);
+        }
+    });
+}

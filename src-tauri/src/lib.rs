@@ -1,10 +1,9 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use tauri::Manager;
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+use tauri_plugin_dialog::DialogExt;
 
+mod db;
+
+// Window management commands
 #[tauri::command]
 fn set_always_on_top(window: tauri::Window, always_on_top: bool) {
     println!("Setting always on top to: {}", always_on_top);
@@ -23,72 +22,112 @@ fn start_drag(window: tauri::Window) {
     let _ = window.start_dragging();
 }
 
-mod db;
-
+// Root directory commands
 #[tauri::command]
-fn load_note(app_handle: tauri::AppHandle) -> String {
-    db::get_note(&app_handle).unwrap_or_default()
-}
-
-#[tauri::command]
-fn save_note_content(app_handle: tauri::AppHandle, content: String) {
-    let _ = db::save_note(&app_handle, content);
-}
-
-#[tauri::command]
-fn load_todos(app_handle: tauri::AppHandle) -> Vec<db::TodoItem> {
-    db::get_todos(&app_handle).unwrap_or_default()
-}
-
-#[tauri::command]
-fn add_todo_item(app_handle: tauri::AppHandle, text: String) -> u32 {
-    db::save_todo(&app_handle, text).unwrap_or(0)
-}
-
-#[tauri::command]
-fn update_todo_status(app_handle: tauri::AppHandle, id: u32, completed: bool) {
-    let _ = db::update_todo(&app_handle, id, completed);
-}
-
-#[tauri::command]
-fn update_todo_text(app_handle: tauri::AppHandle, id: u32, text: String) {
-    let _ = db::update_todo_text(&app_handle, id, text);
-}
-
-#[tauri::command]
-fn remove_todo_item(app_handle: tauri::AppHandle, id: u32) {
-    let _ = db::delete_todo(&app_handle, id);
-}
-
-#[tauri::command]
-fn move_todo_item(app_handle: tauri::AppHandle, id: u32, target_parent_id: Option<u32>, target_position: i32) {
-    println!("[BACKEND] move_todo_item called: id={}, parent={:?}, pos={}", id, target_parent_id, target_position);
-    match db::move_todo(&app_handle, id, target_parent_id, target_position) {
-        Ok(_) => println!("[BACKEND] ✅ move_todo succeeded"),
-        Err(e) => println!("[BACKEND] ❌ move_todo failed: {}", e),
+async fn select_root_directory(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let dialog = app_handle.dialog().file();
+    
+    if let Some(file_path) = dialog.blocking_pick_folder() {
+        if let Some(path) = file_path.as_path() {
+            if let Some(path_str) = path.to_str() {
+                db::set_root_directory(&app_handle, path_str.to_string())
+                    .map_err(|e| e.to_string())?;
+                return Ok(path_str.to_string());
+            }
+        }
+        Err("Invalid path encoding".to_string())
+    } else {
+        Err("No folder selected".to_string())
     }
 }
 
 #[tauri::command]
-fn log_message(msg: String) {
-    println!("[FRONTEND] {}", msg);
+fn get_root_directory(app_handle: tauri::AppHandle) -> Option<String> {
+    db::get_root_directory(&app_handle).ok().flatten()
+}
+
+// File scanning commands
+#[tauri::command]
+fn scan_files(_app_handle: tauri::AppHandle, root_path: String) -> Result<Vec<db::FileListItem>, String> {
+    eprintln!("🎯 [TAURI] scan_files command called with path: {}", root_path);
+    let result = db::scan_directory_lightweight(root_path).map_err(|e| {
+        let err_msg = e.to_string();
+        eprintln!("❌ [TAURI] scan_files failed: {}", err_msg);
+        err_msg
+    });
+    if result.is_ok() {
+        eprintln!("✅ [TAURI] scan_files completed successfully");
+    }
+    result
 }
 
 #[tauri::command]
-fn set_todo_count(app_handle: tauri::AppHandle, id: u32, count: Option<i32>) {
-    let _ = db::set_todo_count(&app_handle, id, count);
+fn get_all_files(app_handle: tauri::AppHandle) -> Result<Vec<db::FileInfo>, String> {
+    db::get_all_files(&app_handle).map_err(|e| e.to_string())
+}
+
+// Tag CRUD commands
+#[tauri::command]
+fn create_tag(
+    app_handle: tauri::AppHandle,
+    name: String,
+    parent_id: Option<u32>,
+    color: Option<String>,
+) -> Result<u32, String> {
+    db::create_tag(&app_handle, name, parent_id, color).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn decrement_todo(app_handle: tauri::AppHandle, id: u32) {
-    let _ = db::decrement_todo(&app_handle, id);
+fn get_all_tags(app_handle: tauri::AppHandle) -> Result<Vec<db::TagInfo>, String> {
+    db::get_all_tags(&app_handle).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn reset_all_todos(app_handle: tauri::AppHandle) {
-    let _ = db::reset_all_todos(&app_handle);
+fn update_tag(
+    app_handle: tauri::AppHandle,
+    id: u32,
+    name: String,
+    color: Option<String>,
+) -> Result<(), String> {
+    db::update_tag(&app_handle, id, name, color).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn delete_tag(app_handle: tauri::AppHandle, id: u32) -> Result<(), String> {
+    db::delete_tag(&app_handle, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn move_tag(app_handle: tauri::AppHandle, id: u32, new_parent_id: Option<u32>) -> Result<(), String> {
+    db::move_tag(&app_handle, id, new_parent_id).map_err(|e| e.to_string())
+}
+
+// File-tag relationship commands
+#[tauri::command]
+fn add_file_tag(app_handle: tauri::AppHandle, file_path: String, tag_id: u32) -> Result<(), String> {
+    db::add_file_tag(&app_handle, file_path, tag_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_file_tag(app_handle: tauri::AppHandle, file_id: u32, tag_id: u32) -> Result<(), String> {
+    db::remove_file_tag(&app_handle, file_id, tag_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_file_tags(app_handle: tauri::AppHandle, file_id: u32) -> Result<Vec<db::TagInfo>, String> {
+    db::get_file_tags(&app_handle, file_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn filter_files_by_tags(
+    app_handle: tauri::AppHandle,
+    tag_ids: Vec<u32>,
+    use_and_logic: bool,
+) -> Result<Vec<db::FileInfo>, String> {
+    db::get_files_by_tags(&app_handle, tag_ids, use_and_logic).map_err(|e| e.to_string())
+}
+
+// Window state commands
 #[tauri::command]
 fn save_window_state(
     app_handle: tauri::AppHandle,
@@ -113,32 +152,15 @@ pub fn run() {
             let _ = app.get_webview_window("main").expect("no main window").set_focus();
         }))
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) = event {
                 let win = window.clone();
-                // Spawn a task to save state to avoid blocking the event loop
-                // In a real app, you might want to debounce this
                 std::thread::spawn(move || {
                     if let Ok(factor) = win.scale_factor() {
                         if let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) {
                             let logical_pos = pos.to_logical::<f64>(factor);
                             let logical_size = size.to_logical::<f64>(factor);
-                            // We need to get the pinned state too.
-                            // Since we can't easily get it from the window struct directly without a getter (which exists but might not be exposed easily in all versions),
-                            // we'll assume we just update x, y, width, height and keep pinned as is?
-                            // Actually db::save_window_state overwrites everything.
-                            // We should probably fetch the current pinned state from DB or just pass it if we can get it.
-                            // window.is_always_on_top() is available?
-                            // Let's check if we can get always_on_top state.
-                            // If not, we might overwrite pinned with false if we don't know.
-                            // Wait, db::save_window_state takes pinned.
-                            // Let's try to read the current pinned state from the window if possible.
-                            // window.is_always_on_top() -> Result<bool> (Tauri 2.0?)
-                            // In Tauri 1.x it wasn't easily available.
-                            // If we can't get it, we should modify db::save_window_state to allow partial updates or read-modify-write.
-                            
-                            // For now, let's try to get it.
-                            // If not, we'll read from DB first.
                             let app_handle = win.app_handle();
                             let pinned = if let Ok(Some(state)) = db::load_window_state(app_handle) {
                                 state.pinned
@@ -173,22 +195,22 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            greet, 
-            set_always_on_top, 
-            close_window, 
+            set_always_on_top,
+            close_window,
             start_drag,
-            load_note,
-            save_note_content,
-            load_todos,
-            add_todo_item,
-            update_todo_status,
-            update_todo_text,
-            remove_todo_item,
-            move_todo_item,
-            log_message,
-            set_todo_count,
-            decrement_todo,
-            reset_all_todos,
+            select_root_directory,
+            get_root_directory,
+            scan_files,
+            get_all_files,
+            create_tag,
+            get_all_tags,
+            update_tag,
+            delete_tag,
+            move_tag,
+            add_file_tag,
+            remove_file_tag,
+            get_file_tags,
+            filter_files_by_tags,
             save_window_state,
             load_window_state
         ])

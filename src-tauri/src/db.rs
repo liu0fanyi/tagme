@@ -2,8 +2,38 @@ use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri::Manager;
+use std::path::Path;
+use sha2::{Sha256, Digest};
+use std::fs;
+use std::time::SystemTime;
 
-#[derive(Debug, Serialize, Deserialize)]
+// Lightweight file listing for scan (no hash, not in DB yet)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileListItem {
+    pub path: String,
+    pub size_bytes: u64,
+    pub last_modified: i64,
+}
+
+// Full file info for files in database (with hash)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileInfo {
+    pub id: u32,
+    pub path: String,
+    pub content_hash: String,
+    pub size_bytes: u64,
+    pub last_modified: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TagInfo {
+    pub id: u32,
+    pub name: String,
+    pub parent_id: Option<u32>,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WindowState {
     pub width: f64,
     pub height: f64,
@@ -12,359 +42,433 @@ pub struct WindowState {
     pub pinned: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TodoItem {
-    pub id: u32,
-    pub text: String,
-    pub completed: bool,
-    pub parent_id: Option<u32>,
-    pub position: i32,
-    pub target_count: Option<i32>,
-    pub current_count: i32,
+fn get_db_path(app_handle: &AppHandle) -> std::path::PathBuf {
+    app_handle
+        .path()
+        .app_data_dir()
+        .expect("failed to get app data dir")
+        .join("tagme_app.db")
 }
 
 pub fn init_db(app_handle: &AppHandle) -> Result<()> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    std::fs::create_dir_all(&app_dir).unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    println!("Database path: {:?}", db_path);
-    
-    let conn = Connection::open(db_path)?;
-    
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY,
-            content TEXT
-        )",
-        [],
-    )?;
+    let db_path = get_db_path(app_handle);
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).expect("failed to create app data dir");
+    }
+
+    let conn = Connection::open(&db_path)?;
 
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS todos (
+        "CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT NOT NULL,
-            completed BOOLEAN NOT NULL,
-            parent_id INTEGER,
-            position INTEGER DEFAULT 0,
-            target_count INTEGER,
-            current_count INTEGER DEFAULT 0,
-            FOREIGN KEY(parent_id) REFERENCES todos(id) ON DELETE CASCADE
+            path TEXT NOT NULL UNIQUE,
+            content_hash TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            last_modified INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
         )",
         [],
     )?;
 
-    // Migration: Add columns if they don't exist (simplistic approach)
-    let _ = conn.execute("ALTER TABLE todos ADD COLUMN parent_id INTEGER", []);
-    let _ = conn.execute("ALTER TABLE todos ADD COLUMN position INTEGER DEFAULT 0", []);
-    let _ = conn.execute("ALTER TABLE todos ADD COLUMN target_count INTEGER", []);
-    let _ = conn.execute("ALTER TABLE todos ADD COLUMN current_count INTEGER DEFAULT 0", []);
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            parent_id INTEGER,
+            color TEXT,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (parent_id) REFERENCES tags(id) ON DELETE CASCADE,
+            UNIQUE(name, parent_id)
+        )",
+        [],
+    )?;
 
-    // Create window_state table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS file_tags (
+            file_id INTEGER NOT NULL,
+            tag_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (file_id, tag_id),
+            FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+            FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+        [],
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS window_state (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            width REAL NOT NULL DEFAULT 300,
-            height REAL NOT NULL DEFAULT 300,
-            x REAL NOT NULL DEFAULT 100,
-            y REAL NOT NULL DEFAULT 100,
-            pinned INTEGER NOT NULL DEFAULT 0
+            width REAL NOT NULL,
+            height REAL NOT NULL,
+            x REAL NOT NULL,
+            y REAL NOT NULL,
+            pinned INTEGER NOT NULL
         )",
         [],
     )?;
 
-    // Initialize default note if empty
-    let count: i32 = conn.query_row("SELECT count(*) FROM notes", [], |row| row.get(0))?;
-    if count == 0 {
-        conn.execute("INSERT INTO notes (id, content) VALUES (1, '')", [])?;
-    }
-
     Ok(())
 }
 
-pub fn get_note(app_handle: &AppHandle) -> Result<String> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
-    let content: String = conn.query_row(
-        "SELECT content FROM notes WHERE id = 1",
-        [],
-        |row| row.get(0),
-    )?;
-    
-    Ok(content)
-}
-
-pub fn save_note(app_handle: &AppHandle, content: String) -> Result<()> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
+// Settings functions
+pub fn set_root_directory(app_handle: &AppHandle, path: String) -> Result<()> {
+    let conn = Connection::open(get_db_path(app_handle))?;
     conn.execute(
-        "UPDATE notes SET content = ?1 WHERE id = 1",
-        params![content],
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('root_directory', ?1)",
+        params![path],
     )?;
-    
     Ok(())
 }
 
-pub fn get_todos(app_handle: &AppHandle) -> Result<Vec<TodoItem>> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
-    let mut stmt = conn.prepare("SELECT id, text, completed, parent_id, position, target_count, current_count FROM todos ORDER BY position ASC")?;
-    let todo_iter = stmt.query_map([], |row| {
-        Ok(TodoItem {
-            id: row.get(0)?,
-            text: row.get(1)?,
-            completed: row.get(2)?,
-            parent_id: row.get(3)?,
-            position: row.get(4)?,
-            target_count: row.get(5)?,
-            current_count: row.get(6)?,
-        })
-    })?;
-
-    let mut todos = Vec::new();
-    for todo in todo_iter {
-        todos.push(todo?);
-    }
-    
-    Ok(todos)
-}
-
-pub fn save_todo(app_handle: &AppHandle, text: String) -> Result<u32> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
-    // Get max position to append to end
-    let max_pos: Result<i32> = conn.query_row(
-        "SELECT COALESCE(MAX(position), -1) FROM todos WHERE parent_id IS NULL",
+pub fn get_root_directory(app_handle: &AppHandle) -> Result<Option<String>> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let result = conn.query_row(
+        "SELECT value FROM settings WHERE key = 'root_directory'",
         [],
         |row| row.get(0),
     );
-    let position = max_pos.unwrap_or(-1) + 1;
-    
-    println!("[DB] Creating new todo with position: {}", position);
-
-    conn.execute(
-        "INSERT INTO todos (text, completed, parent_id, position) VALUES (?1, ?2, ?3, ?4)",
-        params![text, false, None::<u32>, position],
-    )?;
-    
-    let id = conn.last_insert_rowid() as u32;
-    println!("[DB] Created todo id={} at position={}", id, position);
-    Ok(id)
+    match result {
+        Ok(path) => Ok(Some(path)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
-pub fn update_todo(app_handle: &AppHandle, id: u32, completed: bool) -> Result<()> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let mut conn = Connection::open(db_path)?;
+// File hashing function
+fn hash_file_content(path: &Path) -> Result<String, std::io::Error> {
+    let file = fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut reader, &mut hasher)?;
+    let hash = hasher.finalize();
+    Ok(format!("{:x}", hash))
+}
+
+// Lightweight file scanning - just list files, no hashing or DB operations
+pub fn scan_directory_lightweight(root_path: String) -> Result<Vec<FileListItem>, std::io::Error> {
+    eprintln!("🔍 Starting lightweight scan for directory: {}", root_path);
     
-    let tx = conn.transaction()?;
+    let mut scanned_files = Vec::new();
+    let mut file_count = 0;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
 
-    println!("[DB] update_todo: id={}, completed={}", id, completed);
+    // Non-recursive scan: only read direct files in the directory
+    println!("📂 Reading directory entries...");
+    for entry in fs::read_dir(&root_path)?{
+        if let Ok(entry) = entry {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_file() {
+                    let path = entry.path();
+                    let path_str = path.to_string_lossy().to_string();
+                    file_count += 1;
 
-    // 1. Update the target item
-    tx.execute(
-        "UPDATE todos SET completed = ?1 WHERE id = ?2",
-        params![completed, id],
-    )?;
+                    // Get file metadata only (no hashing!)
+                    if let Ok(metadata) = fs::metadata(&path) {
+                        let size_bytes = metadata.len();
+                        let last_modified = metadata
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(now);
 
-    // 2. Cascade Down: Update all descendants
-    // Use recursive CTE to find all descendant IDs
-    let affected = tx.execute(
-        "WITH RECURSIVE descendants(id) AS (
-            SELECT id FROM todos WHERE parent_id = ?1
-            UNION ALL
-            SELECT t.id FROM todos t
-            JOIN descendants d ON t.parent_id = d.id
+                        scanned_files.push(FileListItem {
+                            path: path_str,
+                            size_bytes,
+                            last_modified,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!("✅ Lightweight scan complete! Found {} files", scanned_files.len());
+    Ok(scanned_files)
+}
+
+// Hash and insert file into database (called when tagging a file)
+// Returns file_id of existing or newly inserted file
+pub fn hash_and_insert_file(app_handle: &AppHandle, path: String) -> Result<u32> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let path_obj = Path::new(&path);
+    
+    // Get file metadata
+    let metadata = fs::metadata(&path_obj)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let size_bytes = metadata.len();
+    let last_modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(now);
+
+    // Check if file exists in DB
+    let existing: Option<(u32, String, i64, i64)> = conn
+        .query_row(
+            "SELECT id, content_hash, size_bytes, last_modified FROM files WHERE path = ?1",
+            params![path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
-        UPDATE todos SET completed = ?2 WHERE id IN descendants",
-        params![id, completed],
-    )?;
-    println!("[DB] Cascade Down: Updated {} descendants", affected);
+        .ok();
 
-    // 3. Cascade Up: Update ancestors
-    let mut current_id = id;
-    loop {
-        // Get parent of current_id
-        let parent_id: Option<u32> = tx.query_row(
-            "SELECT parent_id FROM todos WHERE id = ?",
-            params![current_id],
-            |row| row.get(0),
-        )?;
-
-        let parent_id = match parent_id {
-            Some(pid) => pid,
-            None => {
-                println!("[DB] Cascade Up: Reached root at id={}", current_id);
-                break; // No parent, we are at root
-            },
-        };
-
-        // Check siblings status
-        let (total, completed_count): (i32, i32) = tx.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(CASE WHEN completed THEN 1 ELSE 0 END), 0)
-             FROM todos WHERE parent_id = ?",
-            params![parent_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-
-        let new_parent_status = total > 0 && total == completed_count;
-        println!("[DB] Cascade Up: Checking parent={}, total={}, completed={}, new_status={}", parent_id, total, completed_count, new_parent_status);
-
-        // Update parent
-        tx.execute(
-            "UPDATE todos SET completed = ? WHERE id = ?",
-            params![new_parent_status, parent_id],
-        )?;
-
-        // Move up
-        current_id = parent_id;
-    }
-    
-    tx.commit()?;
-    println!("[DB] update_todo transaction committed");
-    
-    Ok(())
-}
-
-pub fn update_todo_text(app_handle: &AppHandle, id: u32, text: String) -> Result<()> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
-    conn.execute(
-        "UPDATE todos SET text = ?1 WHERE id = ?2",
-        params![text, id],
-    )?;
-    
-    Ok(())
-}
-
-pub fn delete_todo(app_handle: &AppHandle, id: u32) -> Result<()> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
-    conn.execute(
-        "DELETE FROM todos WHERE id = ?1",
-        params![id],
-    )?;
-    
-    Ok(())
-}
-
-pub fn move_todo(app_handle: &AppHandle, id: u32, target_parent_id: Option<u32>, target_position: i32) -> Result<()> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let mut conn = Connection::open(db_path)?;
-    
-    let tx = conn.transaction()?;
-
-    // 1. Get current state
-    let (current_parent_id, current_position): (Option<u32>, i32) = tx.query_row(
-        "SELECT parent_id, position FROM todos WHERE id = ?",
-        params![id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-
-    // 2. Remove from old list (shift items up)
-    if let Some(pid) = current_parent_id {
-        tx.execute(
-            "UPDATE todos SET position = position - 1 WHERE parent_id = ? AND position > ?",
-            params![pid, current_position],
-        )?;
+    let file_id = if let Some((id, old_hash, old_size, old_mtime)) = existing {
+        eprintln!("📄 File exists in DB (id: {})", id);
+        
+        // Early cutoff: if size and mtime match, reuse old hash
+        if old_size == size_bytes as i64 && old_mtime == last_modified {
+            eprintln!("   └─ ✨ Metadata unchanged - reusing cached hash");
+            id
+        } else {
+            // Metadata changed, need to re-hash
+            eprintln!("   └─ Metadata changed, re-hashing...");
+            let new_hash = hash_file_content(&path_obj)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            
+            conn.execute(
+                "UPDATE files SET content_hash = ?1, size_bytes = ?2, last_modified = ?3, updated_at = ?4 WHERE id = ?5",
+                params![new_hash, size_bytes as i64, last_modified, now, id],
+            )?;
+            eprintln!("   └─ ✅ Updated in DB");
+            id
+        }
     } else {
-        tx.execute(
-            "UPDATE todos SET position = position - 1 WHERE parent_id IS NULL AND position > ?",
-            params![current_position],
+        // New file - must hash and insert
+        eprintln!("📄 New file, hashing and inserting: {}", path);
+        let content_hash = hash_file_content(&path_obj)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        
+        conn.execute(
+            "INSERT INTO files (path, content_hash, size_bytes, last_modified, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![path, content_hash, size_bytes as i64, last_modified, now, now],
         )?;
+        let new_id = conn.last_insert_rowid() as u32;
+        eprintln!("   └─ ✅ Inserted with id: {}", new_id);
+        new_id
+    };
+
+    Ok(file_id)
+}
+
+
+// Get all files
+pub fn get_all_files(app_handle: &AppHandle) -> Result<Vec<FileInfo>> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let mut stmt = conn.prepare(
+        "SELECT id, path, content_hash, size_bytes, last_modified FROM files ORDER BY path",
+    )?;
+
+    let files = stmt
+        .query_map([], |row| {
+            Ok(FileInfo {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                content_hash: row.get(2)?,
+                size_bytes: row.get::<_, i64>(3)? as u64,
+                last_modified: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(files)
+}
+
+// Tag CRUD operations
+pub fn create_tag(
+    app_handle: &AppHandle,
+    name: String,
+    parent_id: Option<u32>,
+    color: Option<String>,
+) -> Result<u32> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    conn.execute(
+        "INSERT INTO tags (name, parent_id, color, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![name, parent_id, color, now],
+    )?;
+
+    Ok(conn.last_insert_rowid() as u32)
+}
+
+pub fn get_all_tags(app_handle: &AppHandle) -> Result<Vec<TagInfo>> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let mut stmt = conn.prepare("SELECT id, name, parent_id, color FROM tags ORDER BY name")?;
+
+    let tags = stmt
+        .query_map([], |row| {
+            Ok(TagInfo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                parent_id: row.get(2)?,
+                color: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(tags)
+}
+
+pub fn update_tag(
+    app_handle: &AppHandle,
+    id: u32,
+    name: String,
+    color: Option<String>,
+) -> Result<()> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    conn.execute(
+        "UPDATE tags SET name = ?1, color = ?2 WHERE id = ?3",
+        params![name, color, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_tag(app_handle: &AppHandle, id: u32) -> Result<()> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    conn.execute("DELETE FROM tags WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn move_tag(app_handle: &AppHandle, id: u32, new_parent_id: Option<u32>) -> Result<()> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    conn.execute(
+        "UPDATE tags SET parent_id = ?1 WHERE id = ?2",
+        params![new_parent_id, id],
+    )?;
+    Ok(())
+}
+
+// File-tag relationship operations
+// Now accepts file_path instead of file_id - will hash and insert file if needed
+pub fn add_file_tag(app_handle: &AppHandle, file_path: String, tag_id: u32) -> Result<()> {
+    // First, ensure file is in database (hash if needed)
+    let file_id = hash_and_insert_file(app_handle, file_path)?;
+    
+    // Now add the tag relationship
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO file_tags (file_id, tag_id, created_at) VALUES (?1, ?2, ?3)",
+        params![file_id, tag_id, now],
+    )?;
+    
+    eprintln!("✅ Tag {} added to file {}", tag_id, file_id);
+    Ok(())
+}
+
+pub fn remove_file_tag(app_handle: &AppHandle, file_id: u32, tag_id: u32) -> Result<()> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    conn.execute(
+        "DELETE FROM file_tags WHERE file_id = ?1 AND tag_id = ?2",
+        params![file_id, tag_id],
+    )?;
+    Ok(())
+}
+
+pub fn get_file_tags(app_handle: &AppHandle, file_id: u32) -> Result<Vec<TagInfo>> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.name, t.parent_id, t.color 
+         FROM tags t 
+         JOIN file_tags ft ON t.id = ft.tag_id 
+         WHERE ft.file_id = ?1
+         ORDER BY t.name",
+    )?;
+
+    let tags = stmt
+        .query_map(params![file_id], |row| {
+            Ok(TagInfo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                parent_id: row.get(2)?,
+                color: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(tags)
+}
+
+pub fn get_files_by_tags(
+    app_handle: &AppHandle,
+    tag_ids: Vec<u32>,
+    use_and_logic: bool,
+) -> Result<Vec<FileInfo>> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+
+    if tag_ids.is_empty() {
+        return get_all_files(app_handle);
     }
 
-    // 3. Make space in new list (shift items down)
-    if let Some(pid) = target_parent_id {
-        tx.execute(
-            "UPDATE todos SET position = position + 1 WHERE parent_id = ? AND position >= ?",
-            params![pid, target_position],
-        )?;
+    let query = if use_and_logic {
+        // AND logic: files must have ALL selected tags
+        format!(
+            "SELECT DISTINCT f.id, f.path, f.content_hash, f.size_bytes, f.last_modified
+             FROM files f
+             WHERE (SELECT COUNT(DISTINCT ft.tag_id) 
+                    FROM file_tags ft 
+                    WHERE ft.file_id = f.id AND ft.tag_id IN ({})) = {}
+             ORDER BY f.path",
+            tag_ids.iter().map(|_| "?").collect::<Vec<_>>().join(","),
+            tag_ids.len()
+        )
     } else {
-        tx.execute(
-            "UPDATE todos SET position = position + 1 WHERE parent_id IS NULL AND position >= ?",
-            params![target_position],
-        )?;
-    }
+        // OR logic: files must have ANY selected tag
+        format!(
+            "SELECT DISTINCT f.id, f.path, f.content_hash, f.size_bytes, f.last_modified
+             FROM files f
+             JOIN file_tags ft ON f.id = ft.file_id
+             WHERE ft.tag_id IN ({})
+             ORDER BY f.path",
+            tag_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+        )
+    };
 
-    // 4. Update the item itself
-    tx.execute(
-        "UPDATE todos SET parent_id = ?, position = ? WHERE id = ?",
-        params![target_parent_id, target_position, id],
-    )?;
+    let mut stmt = conn.prepare(&query)?;
+    let params: Vec<_> = tag_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
 
-    tx.commit()?;
-    
-    Ok(())
+    let files = stmt
+        .query_map(&params[..], |row| {
+            Ok(FileInfo {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                content_hash: row.get(2)?,
+                size_bytes: row.get::<_, i64>(3)? as u64,
+                last_modified: row.get(4)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(files)
 }
 
-pub fn set_todo_count(app_handle: &AppHandle, id: u32, count: Option<i32>) -> Result<()> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
-    let current_count = count.unwrap_or(0);
-    
-    conn.execute(
-        "UPDATE todos SET target_count = ?1, current_count = ?2 WHERE id = ?3",
-        params![count, current_count, id],
-    )?;
-    
-    Ok(())
-}
-
-pub fn decrement_todo(app_handle: &AppHandle, id: u32) -> Result<()> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
-    // Decrement count
-    conn.execute(
-        "UPDATE todos SET current_count = current_count - 1 WHERE id = ? AND current_count > 0",
-        params![id],
-    )?;
-    
-    // Check if reached 0
-    let current_count: i32 = conn.query_row(
-        "SELECT current_count FROM todos WHERE id = ?",
-        params![id],
-        |row| row.get(0),
-    )?;
-    
-    if current_count <= 0 {
-        // Mark as completed and trigger cascade
-        update_todo(app_handle, id, true)?;
-    }
-    
-    Ok(())
-}
-
-pub fn reset_all_todos(app_handle: &AppHandle) -> Result<()> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
-    // Reset all todos to incomplete and reset countdown
-    conn.execute(
-        "UPDATE todos SET completed = 0, current_count = COALESCE(target_count, 0)",
-        [],
-    )?;
-    
-    Ok(())
-}
-
+// Window state management
 pub fn save_window_state(
     app_handle: &AppHandle,
     width: f64,
@@ -373,24 +477,17 @@ pub fn save_window_state(
     y: f64,
     pinned: bool,
 ) -> Result<()> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
-    // Use INSERT OR REPLACE to upsert
+    let conn = Connection::open(get_db_path(app_handle))?;
     conn.execute(
-        "INSERT OR REPLACE INTO window_state (id, width, height, x, y, pinned) VALUES (1, ?, ?, ?, ?, ?)",
-        params![width, height, x, y, if pinned { 1 } else { 0 }],
+        "INSERT OR REPLACE INTO window_state (id, width, height, x, y, pinned)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+        params![width, height, x, y, pinned as i32],
     )?;
-    
     Ok(())
 }
 
 pub fn load_window_state(app_handle: &AppHandle) -> Result<Option<WindowState>> {
-    let app_dir = app_handle.path().app_data_dir().unwrap();
-    let db_path = app_dir.join("sticky_notes.db");
-    let conn = Connection::open(db_path)?;
-    
+    let conn = Connection::open(get_db_path(app_handle))?;
     let result = conn.query_row(
         "SELECT width, height, x, y, pinned FROM window_state WHERE id = 1",
         [],
@@ -404,7 +501,7 @@ pub fn load_window_state(app_handle: &AppHandle) -> Result<Option<WindowState>> 
             })
         },
     );
-    
+
     match result {
         Ok(state) => Ok(Some(state)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
