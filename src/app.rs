@@ -407,6 +407,92 @@ pub fn App() -> impl IntoView {
                         on_add_tag=add_tag_to_selected_files
                     />
                 </div>
+
+                <div class="right-sidebar">
+                    <div class="panel-header">
+                        <h2>"File Tags"</h2>
+                    </div>
+                    {move || {
+                        let files = selected_file_paths.get();
+                        let is_empty = files.is_empty();
+                        let count = files.len();
+                        
+                        let header = if is_empty {
+                            "No files selected".to_string()
+                        } else if count == 1 {
+                            files[0].split("\\\\").last().unwrap_or(&files[0]).to_string()
+                        } else {
+                            format!("{} files selected", count)
+                        };
+
+                        view! {
+                            <div class="tag-panel">
+                                <h3>{header}</h3>
+                                <Show when=move || !is_empty>
+                                    <div class="new-tag-input">
+                                        <input
+                                            type="text"
+                                            placeholder="Type tag name and press Enter..."
+                                            prop:value=new_tag_input_sidebar
+                                            on:input=move |e| set_new_tag_input_sidebar.set(event_target_value(&e))
+                                            on:keydown=move |e| {
+                                                if e.key() == "Enter" {
+                                                    let name = new_tag_input_sidebar.get().trim().to_string();
+                                                    if !name.is_empty() {
+                                                        let paths = selected_file_paths.get();
+                                                        spawn_local(async move {
+                                                            let args = CreateTagArgs { name: name.clone(), parent_id: None, color: None };
+                                                            let result = invoke("create_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                            
+                                                            if let Ok(tid) = serde_wasm_bindgen::from_value::<u32>(result) {
+                                                                for p in &paths {
+                                                                    let pc = p.clone();
+                                                                    let args2 = AddFileTagArgs { file_path: pc, tag_id: tid };
+                                                                    let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args2).unwrap()).await;
+                                                                }
+                                                                load_tags(set_all_tags).await;
+                                                                load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
+                                                            }
+                                                        });
+                                                        set_new_tag_input_sidebar.set(String::new());
+                                                    }
+                                                }
+                                            }
+                                        />
+                                    </div>
+                                    <div class="tag-list">
+                                        <For
+                                            each=move || all_tags.get()
+                                            key=|t| t.id
+                                            children=move |t| {
+                                                let tid = t.id;
+                                                let tname = t.name.clone();
+                                                view! {
+                                                    <label class="tag-item">
+                                                        <input
+                                                            type="checkbox"
+                                                            on:change=move |_| {
+                                                                let ps = selected_file_paths.get();
+                                                                for p in &ps {
+                                                                    let pc = p.clone();
+                                                                    spawn_local(async move {
+                                                                        let args = AddFileTagArgs { file_path: pc, tag_id: tid };
+                                                                        let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                                    });
+                                                                }
+                                                            }
+                                                        />
+                                                        <span style=t.color.map(|c| format!("color: {}", c)).unwrap_or_default()>{tname}</span>
+                                                    </label>
+                                                }
+                                            }
+                                        />
+                                    </div>
+                                </Show>
+                            </div>
+                        }
+                    }}
+                </div>
             </div>
 
             {move || show_add_tag_dialog.get().then(|| view! {
