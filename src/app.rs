@@ -618,7 +618,6 @@ fn FileList(
                         <th>"Size"</th>
                         <th>"Modified"</th>
                         <th>"Tags"</th>
-                        <th>"Add Tag"</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -646,24 +645,6 @@ fn FileList(
                                     <td>{format_timestamp(file.last_modified)}</td>
                                     <td class="file-tags">
                                         <span class="not-in-db">"Not tagged yet"</span>
-                                    </td>
-                                    <td>
-                                        <select on:change=move |e| {
-                                            if let Ok(tag_id) = event_target_value(&e).parse::<u32>() {
-                                                on_add_tag(tag_id);
-                                            }
-                                        }>
-                                            <option value="">"Add tag..."</option>
-                                            <For
-                                                each=move || all_tags.get()
-                                                key=|tag| tag.id
-                                                children=move |tag| {
-                                                    view! {
-                                                        <option value=tag.id.to_string()>{tag.name.clone()}</option>
-                                                    }
-                                                }
-                                            />
-                                        </select>
                                     </td>
                                 </tr>
                             }
@@ -706,24 +687,6 @@ fn FileList(
                                                 }
                                             }
                                         />
-                                    </td>
-                                    <td>
-                                        <select on:change=move |e| {
-                                            if let Ok(tag_id) = event_target_value(&e).parse::<u32>() {
-                                                on_add_tag(tag_id);
-                                            }
-                                        }>
-                                            <option value="">"Add tag..."</option>
-                                            <For
-                                                each=move || all_tags.get()
-                                                key=|tag| tag.id
-                                                children=move |tag| {
-                                                    view! {
-                                                        <option value=tag.id.to_string()>{tag.name.clone()}</option>
-                                                    }
-                                                }
-                                            />
-                                        </select>
                                     </td>
                                 </tr>
                             }
