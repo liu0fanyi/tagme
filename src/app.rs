@@ -195,11 +195,9 @@ pub fn App() -> impl IntoView {
 
     let select_directory = move |_| {
         spawn_local(async move {
-            let result: Result<String, String> = serde_wasm_bindgen::from_value(
-                invoke("select_root_directory", JsValue::NULL).await
-            ).unwrap_or(Err("Failed to select directory".to_string()));
+            let path_val = invoke("select_root_directory", JsValue::NULL).await;
             
-            if let Ok(path) = result {
+            if let Ok(path) = serde_wasm_bindgen::from_value::<String>(path_val) {
                 set_root_directory.set(Some(path.clone()));
                 
                 // Automatically trigger scan after selecting directory
@@ -702,12 +700,17 @@ fn FileList(
 
 // Helper functions
 async fn load_tags(set_all_tags: WriteSignal<Vec<TagInfo>>) {
-    let result: Result<Vec<TagInfo>, String> = serde_wasm_bindgen::from_value(
-        invoke("get_all_tags", JsValue::NULL).await
-    ).unwrap_or(Ok(Vec::new()));
+    web_sys::console::log_1(&"Loading tags...".into());
+    let tags_val = invoke("get_all_tags", JsValue::NULL).await;
     
-    if let Ok(tags) = result {
-        set_all_tags.set(tags);
+    match serde_wasm_bindgen::from_value::<Vec<TagInfo>>(tags_val) {
+        Ok(tags) => {
+            web_sys::console::log_1(&format!("Loaded {} tags", tags.len()).into());
+            set_all_tags.set(tags);
+        },
+        Err(e) => {
+            web_sys::console::error_1(&format!("Error deserializing tags: {:?}", e).into());
+        }
     }
 }
 
@@ -716,29 +719,30 @@ async fn load_all_files(
     set_displayed_files: WriteSignal<Vec<FileInfo>>,
     set_file_tags_map: WriteSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
 ) {
-    let result: Result<Vec<FileInfo>, String> = serde_wasm_bindgen::from_value(
-        invoke("get_all_files", JsValue::NULL).await
-    ).unwrap_or(Ok(Vec::new()));
-    
-    if let Ok(files) = result {
-        // Load tags for each file
-        let mut tags_map = std::collections::HashMap::new();
-        for file in &files {
-            let file_id = file.id;
-            let args = GetFileTagsArgs { file_id };
-            let tags_result: Result<Vec<TagInfo>, String> = serde_wasm_bindgen::from_value(
-                invoke("get_file_tags", serde_wasm_bindgen::to_value(&args).unwrap()).await
-            ).unwrap_or(Ok(Vec::new()));
-            
-            if let Ok(tags) = tags_result {
-                tags_map.insert(file_id, tags);
-            }
+    let files_val = invoke("get_all_files", JsValue::NULL).await;
+    let files = match serde_wasm_bindgen::from_value::<Vec<FileInfo>>(files_val) {
+        Ok(f) => f,
+        Err(e) => {
+            web_sys::console::error_1(&format!("Error loading files: {:?}", e).into());
+            return;
         }
+    };
+    
+    // Load tags for each file
+    let mut tags_map = std::collections::HashMap::new();
+    for file in &files {
+        let file_id = file.id;
+        let args = GetFileTagsArgs { file_id };
+        let tags_val = invoke("get_file_tags", serde_wasm_bindgen::to_value(&args).unwrap()).await;
         
-        set_file_tags_map.set(tags_map);
-        set_all_files.set(files.clone());
-        set_displayed_files.set(files);
+        if let Ok(tags) = serde_wasm_bindgen::from_value::<Vec<TagInfo>>(tags_val) {
+            tags_map.insert(file_id, tags);
+        }
     }
+    
+    set_file_tags_map.set(tags_map);
+    set_all_files.set(files.clone());
+    set_displayed_files.set(files);
 }
 
 fn filter_files(
@@ -757,11 +761,9 @@ fn filter_files(
             tag_ids,
             use_and_logic: use_and,
         };
-        let result: Result<Vec<FileInfo>, String> = serde_wasm_bindgen::from_value(
-            invoke("filter_files_by_tags", serde_wasm_bindgen::to_value(&args).unwrap()).await
-        ).unwrap_or(Ok(Vec::new()));
+        let result_val = invoke("filter_files_by_tags", serde_wasm_bindgen::to_value(&args).unwrap()).await;
         
-        if let Ok(files) = result {
+        if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileInfo>>(result_val) {
             set_displayed_files.set(files);
         }
     });

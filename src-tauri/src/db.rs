@@ -351,6 +351,7 @@ pub fn create_tag(
 }
 
 pub fn get_all_tags(app_handle: &AppHandle) -> Result<Vec<TagInfo>> {
+    eprintln!("🏷️  [DB] get_all_tags called");
     let conn = Connection::open(get_db_path(app_handle))?;
     let mut stmt = conn.prepare("SELECT id, name, parent_id, color FROM tags ORDER BY name")?;
 
@@ -365,6 +366,10 @@ pub fn get_all_tags(app_handle: &AppHandle) -> Result<Vec<TagInfo>> {
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
+    eprintln!("🏷️  [DB] Found {} tags", tags.len());
+    for tag in &tags {
+        eprintln!("   - Tag: {}, Parent: {:?}", tag.name, tag.parent_id);
+    }
     Ok(tags)
 }
 
