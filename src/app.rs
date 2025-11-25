@@ -166,6 +166,7 @@ pub fn App() -> impl IntoView {
     let (show_add_tag_dialog, set_show_add_tag_dialog) = signal(false);
     let (new_tag_name, set_new_tag_name) = signal(String::new());
     let (new_tag_parent, set_new_tag_parent) = signal(None::<u32>);
+    let (new_tag_input_sidebar, set_new_tag_input_sidebar) = signal(String::new());
 
     // Load initial state
     Effect::new(move || {

@@ -116,6 +116,43 @@ pub fn init_db(app_handle: &AppHandle) -> Result<()> {
         [],
     )?;
 
+    // 检查是否有任何tag数据，如果没有则创建默认tag
+    let tag_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tags",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    if tag_count == 0 {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        eprintln!("🏷️  数据库为空，正在创建默认tag...");
+
+        // 创建默认的tag
+        let default_tags = vec![
+            ("工作", None, Some("#FF6B6B")),
+            ("个人", None, Some("#4ECDC4")),
+            ("重要", None, Some("#45B7D1")),
+            ("项目A", Some(1), Some("#96CEB4")),
+            ("项目B", Some(1), Some("#FECA57")),
+            ("学习", Some(2), Some("#DDA0DD")),
+            ("娱乐", Some(2), Some("#98D8C8")),
+        ];
+
+        for (name, parent_id, color) in default_tags {
+            conn.execute(
+                "INSERT INTO tags (name, parent_id, color, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![name, parent_id, color, now],
+            )?;
+            eprintln!("   ✅ 创建tag: {}", name);
+        }
+
+        eprintln!("🎉 默认tag创建完成！");
+    }
+
     Ok(())
 }
 
@@ -158,7 +195,7 @@ pub fn scan_directory_lightweight(root_path: String) -> Result<Vec<FileListItem>
     eprintln!("🔍 Starting lightweight scan for directory: {}", root_path);
     
     let mut scanned_files = Vec::new();
-    let mut file_count = 0;
+    let mut _file_count = 0;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
@@ -172,7 +209,7 @@ pub fn scan_directory_lightweight(root_path: String) -> Result<Vec<FileListItem>
                 if file_type.is_file() {
                     let path = entry.path();
                     let path_str = path.to_string_lossy().to_string();
-                    file_count += 1;
+                    _file_count += 1;
 
                     // Get file metadata only (no hashing!)
                     if let Ok(metadata) = fs::metadata(&path) {
@@ -230,7 +267,7 @@ pub fn hash_and_insert_file(app_handle: &AppHandle, path: String) -> Result<u32>
         )
         .ok();
 
-    let file_id = if let Some((id, old_hash, old_size, old_mtime)) = existing {
+    let file_id = if let Some((id, _old_hash, old_size, old_mtime)) = existing {
         eprintln!("📄 File exists in DB (id: {})", id);
         
         // Early cutoff: if size and mtime match, reuse old hash

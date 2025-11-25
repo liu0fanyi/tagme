@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(cargo tauri dev:*)",
+      "Bash(cargo tauri build:*)",
+      "Bash(trunk serve:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(trunk build:*)",
+      "Bash(cargo clean:*)",
+      "Bash(findstr:*)",
+      "Bash(rustc:*)",
+      "Bash(del:*)",
+      "Bash(python:*)",
+      "Bash(cargo tauri --version:*)",
+      "WebFetch(domain:github.com)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
