@@ -387,7 +387,7 @@ pub fn App() -> impl IntoView {
                     />
                 </div>
 
-                <div class="right-panel">
+                <div class="center-panel">
                     <div class="panel-header">
                         <h2>"Files"</h2>
                         <div class="file-controls">
