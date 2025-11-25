@@ -403,8 +403,6 @@ pub fn App() -> impl IntoView {
                         file_tags_map=file_tags_map
                         selected_file_paths=selected_file_paths
                         on_toggle=toggle_file_selection
-                        all_tags=all_tags
-                        on_add_tag=add_tag_to_selected_files
                     />
                 </div>
 
@@ -609,8 +607,6 @@ fn FileList(
     file_tags_map: ReadSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
     selected_file_paths: ReadSignal<Vec<String>>,
     on_toggle: impl Fn(String) + 'static + Copy + Send,
-    all_tags: ReadSignal<Vec<TagInfo>>,
-    on_add_tag: impl Fn(u32) + 'static + Copy + Send,
 ) -> impl IntoView {
     view! {
         <div class="file-list">
