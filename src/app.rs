@@ -384,6 +384,7 @@ pub fn App() -> impl IntoView {
                         tags=all_tags
                         selected_tag_ids=selected_tag_ids
                         on_toggle=toggle_tag_selection
+                        set_all_tags=set_all_tags
                     />
                 </div>
 
@@ -517,6 +518,7 @@ fn TagTree(
     tags: ReadSignal<Vec<TagInfo>>,
     selected_tag_ids: ReadSignal<Vec<u32>>,
     on_toggle: impl Fn(u32) + 'static + Copy + Send,
+    set_all_tags: WriteSignal<Vec<TagInfo>>,
 ) -> impl IntoView {
     let root_tags = move || {
         tags.get()
