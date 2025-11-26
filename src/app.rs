@@ -169,6 +169,7 @@ pub fn App() -> impl IntoView {
     let (drop_position, set_drop_position) = signal(0.5f64); // 0.0=top, 1.0=bottom
     let (reload_tags_trigger, set_reload_tags_trigger) = signal(0u32);
     let (last_click_time, set_last_click_time) = signal(0.0);
+    let (is_maximized, set_is_maximized) = signal(false);
 
     // Global mouse up handler for drag and drop
     Effect::new(move |_| {
@@ -368,6 +369,7 @@ pub fn App() -> impl IntoView {
     };
 
     let toggle_maximize = move |_| {
+        set_is_maximized.update(|v| *v = !*v);
         spawn_local(async move {
             let _ = invoke("toggle_maximize", JsValue::NULL).await;
         });
@@ -470,10 +472,20 @@ pub fn App() -> impl IntoView {
                             <path d="M19 13H5v-2h14v2z"/>
                         </svg>
                     </button>
-                    <button on:click=move |_| toggle_maximize(()) class="header-btn" title="Maximize/Restore">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
-                            <path d="M4 4h16v16H4V4zm2 2v12h12V6H6z"/>
-                        </svg>
+                    <button on:click=move |_| toggle_maximize(()) class="header-btn" title=move || if is_maximized.get() { "Restore" } else { "Maximize" }>
+                        {move || if is_maximized.get() {
+                            view! {
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
+                                    <path d="M4 8h4V4h12v12h-4v4H4V8zm2 2v8h8v-2h4V6H10v2H6z"/>
+                                </svg>
+                            }
+                        } else {
+                            view! {
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
+                                    <path d="M4 4h16v16H4V4zm2 2v12h12V6H6z"/>
+                                </svg>
+                            }
+                        }}
                     </button>
                     <button on:click=move |_| close(()) class="header-btn" title="Close">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
