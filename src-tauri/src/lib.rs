@@ -173,6 +173,13 @@ pub fn run() {
             if let tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) = event {
                 let win = window.clone();
                 std::thread::spawn(move || {
+                    // Don't save window size if maximized to prevent incorrect restoration
+                    if let Ok(is_maximized) = win.is_maximized() {
+                        if is_maximized {
+                            return;
+                        }
+                    }
+                    
                     if let Ok(factor) = win.scale_factor() {
                         if let (Ok(pos), Ok(size)) = (win.outer_position(), win.inner_size()) {
                             let logical_pos = pos.to_logical::<f64>(factor);
