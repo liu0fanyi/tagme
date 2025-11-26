@@ -180,6 +180,56 @@ pub fn App() -> impl IntoView {
     let (drop_target_tag_id, set_drop_target_tag_id) = signal(None::<u32>);
     let (reload_tags_trigger, set_reload_tags_trigger) = signal(0u32);
 
+    // Global mouse up handler for drag and drop
+    Effect::new(move |_| {
+        let window = web_sys::window().unwrap();
+        
+        let on_mouseup = Closure::<dyn FnMut(_)>::new(move |_ev: web_sys::MouseEvent| {
+            if let Some(dragged_id) = dragging_tag_id.get_untracked() {
+                web_sys::console::log_1(&format!("🔵 Mouse up - dragged_id: {}", dragged_id).into());
+                
+                if let Some(target_id) = drop_target_tag_id.get_untracked() {
+                    web_sys::console::log_1(&format!("🔵 Drop target: {}", target_id).into());
+                    
+                    if dragged_id != target_id {
+                        // Check for cycles
+                        let tags = all_tags.get_untracked();
+                        let mut is_descendant = false;
+                        let mut check_id = Some(target_id);
+                        while let Some(curr) = check_id {
+                            if curr == dragged_id {
+                                is_descendant = true;
+                                break;
+                            }
+                            check_id = tags.iter().find(|t| t.id == curr).and_then(|t| t.parent_id);
+                        }
+
+                        if !is_descendant {
+                            web_sys::console::log_1(&format!("✅ Valid drop - moving tag {} under {}", dragged_id, target_id).into());
+                            spawn_local(async move {
+                                let args = MoveTagArgs {
+                                    id: dragged_id,
+                                    new_parent_id: Some(target_id),
+                                };
+                                let _ = invoke("move_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                // Trigger reload
+                                set_reload_tags_trigger.update(|v| *v += 1);
+                            });
+                        } else {
+                            web_sys::console::log_1(&"⚠️ Cannot drop - would create cycle".into());
+                        }
+                    }
+                }
+                
+                set_dragging_tag_id.set(None);
+                set_drop_target_tag_id.set(None);
+            }
+        });
+        
+        let _ = window.add_event_listener_with_callback("mouseup", on_mouseup.as_ref().unchecked_ref());
+        on_mouseup.forget();
+    });
+
     // Effect to reload tags when trigger changes
     Effect::new(move |_| {
         reload_tags_trigger.get(); // Track the trigger
@@ -550,14 +600,8 @@ pub fn App() -> impl IntoView {
                                                                     }
                                                                 }
                                                                 
-                                                                // Reload files after a short delay to batch updates
+                                                                // Reload only the affected files immediately
                                                                 spawn_local(async move {
-                                                                    // Simple delay using setTimeout
-                                                                    let promise = js_sys::Promise::new(&mut |resolve, _| {
-                                                                        let window = web_sys::window().unwrap();
-                                                                        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 100);
-                                                                    });
-                                                                    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
                                                                     load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
                                                                 });
                                                             }
@@ -666,6 +710,24 @@ fn TagNode(
     let is_dragging = move || dragging_tag_id.get() == Some(tag_id);
     let is_drop_target = move || drop_target_tag_id.get() == Some(tag_id);
 
+    // Mouse down - start drag
+    let on_mousedown = move |ev: web_sys::MouseEvent| {
+        if ev.button() == 0 { // Left click only
+            set_dragging_tag_id.set(Some(tag_id));
+            web_sys::console::log_1(&format!("🟢 Start dragging tag: {}", tag_id).into());
+            ev.prevent_default();
+            ev.stop_propagation();
+        }
+    };
+
+    // Mouse enter - track potential drop target
+    let on_mouseenter = move |_ev: web_sys::MouseEvent| {
+        if dragging_tag_id.get_untracked().is_some() {
+            set_drop_target_tag_id.set(Some(tag_id));
+            web_sys::console::log_1(&format!("🟬 Hover over tag: {}", tag_id).into());
+        }
+    };
+
     view! {
         <div 
             class="tag-node" 
@@ -675,51 +737,8 @@ fn TagNode(
         >
             <label 
                 class="tag-label"
-                draggable="true"
-                on:dragstart=move |_| {
-                    set_dragging_tag_id.set(Some(tag_id));
-                }
-                on:dragenter=move |e| {
-                    e.prevent_default(); 
-                    if dragging_tag_id.get().is_some() {
-                        set_drop_target_tag_id.set(Some(tag_id));
-                    }
-                }
-                on:dragover=move |e| {
-                    e.prevent_default(); 
-                }
-                on:drop=move |e| {
-                    e.prevent_default();
-                    if let Some(dragged_id) = dragging_tag_id.get_untracked() {
-                        if dragged_id != tag_id {
-                            // Check for cycles
-                            let tags = all_tags.get_untracked();
-                            let mut is_descendant = false;
-                            let mut check_id = Some(tag_id);
-                            while let Some(curr) = check_id {
-                                if curr == dragged_id {
-                                    is_descendant = true;
-                                    break;
-                                }
-                                check_id = tags.iter().find(|t| t.id == curr).and_then(|t| t.parent_id);
-                            }
-
-                            if !is_descendant {
-                                spawn_local(async move {
-                                    let args = MoveTagArgs {
-                                        id: dragged_id,
-                                        new_parent_id: Some(tag_id),
-                                    };
-                                    let _ = invoke("move_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                    // Trigger tag reload
-                                    set_reload_tags_trigger.update(|v| *v += 1);
-                                });
-                            }
-                        }
-                    }
-                    set_dragging_tag_id.set(None);
-                    set_drop_target_tag_id.set(None);
-                }
+                on:mousedown=on_mousedown
+                on:mouseenter=on_mouseenter
             >
                 <input
                     type="checkbox"
