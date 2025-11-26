@@ -178,6 +178,7 @@ pub fn App() -> impl IntoView {
     // Drag and drop state
     let (dragging_tag_id, set_dragging_tag_id) = signal(None::<u32>);
     let (drop_target_tag_id, set_drop_target_tag_id) = signal(None::<u32>);
+    let (drop_position, set_drop_position) = signal(0.5f64); // 0.0=top, 1.0=bottom
     let (reload_tags_trigger, set_reload_tags_trigger) = signal(0u32);
 
     // Global mouse up handler for drag and drop
@@ -190,6 +191,9 @@ pub fn App() -> impl IntoView {
                 
                 if let Some(target_id) = drop_target_tag_id.get_untracked() {
                     web_sys::console::log_1(&format!("🔵 Drop target: {}", target_id).into());
+                    
+                    let pos = drop_position.get_untracked();
+                    web_sys::console::log_1(&format!("📍 Drop position: {:.2}", pos).into());
                     
                     if dragged_id != target_id {
                         // Check for cycles
@@ -459,6 +463,8 @@ pub fn App() -> impl IntoView {
                         set_dragging_tag_id=set_dragging_tag_id
                         drop_target_tag_id=drop_target_tag_id
                         set_drop_target_tag_id=set_drop_target_tag_id
+                        drop_position=drop_position
+                        set_drop_position=set_drop_position
                         set_reload_tags_trigger=set_reload_tags_trigger
                     />
                 </div>
@@ -648,6 +654,8 @@ fn TagTree(
     set_dragging_tag_id: WriteSignal<Option<u32>>,
     drop_target_tag_id: ReadSignal<Option<u32>>,
     set_drop_target_tag_id: WriteSignal<Option<u32>>,
+    drop_position: ReadSignal<f64>,
+    set_drop_position: WriteSignal<f64>,
     set_reload_tags_trigger: WriteSignal<u32>,
 ) -> impl IntoView {
     let root_tags = move || {
@@ -674,6 +682,8 @@ fn TagTree(
                             set_dragging_tag_id=set_dragging_tag_id
                             drop_target_tag_id=drop_target_tag_id
                             set_drop_target_tag_id=set_drop_target_tag_id
+                            drop_position=drop_position
+                            set_drop_position=set_drop_position
                             set_reload_tags_trigger=set_reload_tags_trigger
                         />
                     }
@@ -694,6 +704,8 @@ fn TagNode(
     set_dragging_tag_id: WriteSignal<Option<u32>>,
     drop_target_tag_id: ReadSignal<Option<u32>>,
     set_drop_target_tag_id: WriteSignal<Option<u32>>,
+    drop_position: ReadSignal<f64>,
+    set_drop_position: WriteSignal<f64>,
     set_reload_tags_trigger: WriteSignal<u32>,
 ) -> AnyView {
     let tag_id = tag.id;
@@ -721,24 +733,71 @@ fn TagNode(
     };
 
     // Mouse enter - track potential drop target
-    let on_mouseenter = move |_ev: web_sys::MouseEvent| {
+    let update_position = move |ev: &web_sys::MouseEvent| {
         if dragging_tag_id.get_untracked().is_some() {
             set_drop_target_tag_id.set(Some(tag_id));
-            web_sys::console::log_1(&format!("🟬 Hover over tag: {}", tag_id).into());
+            
+            // Calculate relative position (0.0 = top, 1.0 = bottom)
+            if let Some(target) = ev.current_target() {
+                if let Some(element) = target.dyn_ref::<web_sys::HtmlElement>() {
+                    let rect = element.get_bounding_client_rect();
+                    let y = ev.client_y() as f64;
+                    let top = rect.top();
+                    let height = rect.height();
+                    
+                    if height > 0.0 {
+                        let relative_y = ((y - top) / height).max(0.0).min(1.0);
+                        set_drop_position.set(relative_y);
+                        web_sys::console::log_1(&format!("📍 Tag {} position: {:.2} (y:{}, top:{}, height:{})", 
+                            tag_id, relative_y, y, top, height).into());
+                    }
+                }
+            }
         }
+    };
+
+    let on_mouseenter = move |ev: web_sys::MouseEvent| {
+        web_sys::console::log_1(&format!("🟬 Hover over tag: {}", tag_id).into());
+        update_position(&ev);
+    };
+
+    let on_mousemove = move |ev: web_sys::MouseEvent| {
+        update_position(&ev);
+        ev.stop_propagation();
+    };
+
+    // Visual feedback based on drag state
+    let node_class = move || {
+        let mut classes = vec![];
+        
+        if dragging_tag_id.get() == Some(tag_id) {
+            classes.push("dragging");
+        }
+        
+        if drop_target_tag_id.get() == Some(tag_id) {
+            let pos = drop_position.get();
+            if pos < 0.25 {
+                classes.push("drop-before");
+            } else if pos > 0.75 {
+                classes.push("drop-after");
+            } else {
+                classes.push("drop-child");
+            }
+        }
+        
+        classes.join(" ")
     };
 
     view! {
         <div 
-            class="tag-node" 
+            class=move || format!("tag-node {}", node_class())
             style=format!("margin-left: {}px", level * 20)
-            class:dragging=is_dragging
-            class:drop-target=is_drop_target
         >
             <label 
                 class="tag-label"
                 on:mousedown=on_mousedown
                 on:mouseenter=on_mouseenter
+                on:mousemove=on_mousemove
             >
                 <input
                     type="checkbox"
@@ -766,6 +825,8 @@ fn TagNode(
                                     set_dragging_tag_id=set_dragging_tag_id
                                     drop_target_tag_id=drop_target_tag_id
                                     set_drop_target_tag_id=set_drop_target_tag_id
+                                    drop_position=drop_position
+                                    set_drop_position=set_drop_position
                                     set_reload_tags_trigger=set_reload_tags_trigger
                                 />
                             }
