@@ -43,10 +43,6 @@ struct FileWithTags {
     tags: Vec<TagInfo>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct SetAlwaysOnTopArgs {
-    always_on_top: bool,
-}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,15 +106,6 @@ struct ScanFilesArgs {
     root_path: String,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SaveWindowStateArgs {
-    width: f64,
-    height: f64,
-    x: f64,
-    y: f64,
-    pinned: bool,
-}
 
 fn format_file_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -170,7 +157,6 @@ pub fn App() -> impl IntoView {
     let (displayed_files, set_displayed_files) = signal(Vec::<FileInfo>::new());
     let (file_tags_map, set_file_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
     let (selected_file_paths, set_selected_file_paths) = signal(Vec::<String>::new());
-    let (is_pinned, set_is_pinned) = signal(false);
     let (scanning, set_scanning) = signal(false);
     let (show_add_tag_dialog, set_show_add_tag_dialog) = signal(false);
     let (new_tag_name, set_new_tag_name) = signal(String::new());
@@ -299,11 +285,7 @@ pub fn App() -> impl IntoView {
 
             // Load window state
             let state_value = invoke("load_window_state", JsValue::NULL).await;
-            if let Ok(Some(state)) = serde_wasm_bindgen::from_value::<Option<serde_json::Value>>(state_value) {
-                if let Some(pinned) = state.get("pinned").and_then(|v| v.as_bool()) {
-                    set_is_pinned.set(pinned);
-                }
-            }
+            let _ = state_value; // Unused for now
         });
     });
 
@@ -371,15 +353,7 @@ pub fn App() -> impl IntoView {
         }
     };
 
-    let toggle_pin = move |_| {
-        let new_pinned = !is_pinned.get();
-        set_is_pinned.set(new_pinned);
-        spawn_local(async move {
-            let args = SetAlwaysOnTopArgs { always_on_top: new_pinned };
-            let _ = invoke("set_always_on_top", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-        });
-    };
-
+    
     let close = move |_| {
         spawn_local(async move {
             let _ = invoke("close_window", JsValue::NULL).await;
@@ -469,9 +443,6 @@ pub fn App() -> impl IntoView {
             }>
                 <h1>"TagMe"</h1>
                 <div class="header-buttons">
-                    <button on:click=toggle_pin class="header-btn" title="Pin">
-                        {move || if is_pinned.get() { "📌" } else { "📍" }}
-                    </button>
                     <button on:click=close class="header-btn" title="Close">"×"</button>
                 </div>
             </div>
