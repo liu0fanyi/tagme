@@ -1,6 +1,8 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::{Deserialize, Serialize}; use wasm_bindgen::prelude::*;
+use serde::{Deserialize, Serialize}; 
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 #[wasm_bindgen]
 extern "C" {
@@ -46,6 +48,7 @@ struct SetAlwaysOnTopArgs {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CreateTagArgs {
     name: String,
     parent_id: Option<u32>,
@@ -53,6 +56,7 @@ struct CreateTagArgs {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UpdateTagArgs {
     id: u32,
     name: String,
@@ -65,6 +69,7 @@ struct DeleteTagArgs {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MoveTagArgs {
     id: u32,
     new_parent_id: Option<u32>,
@@ -78,12 +83,14 @@ struct AddFileTagArgs {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RemoveFileTagArgs {
     file_id: u32,
     tag_id: u32,
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GetFileTagsArgs {
     file_id: u32,
 }
@@ -167,6 +174,21 @@ pub fn App() -> impl IntoView {
     let (new_tag_name, set_new_tag_name) = signal(String::new());
     let (new_tag_parent, set_new_tag_parent) = signal(None::<u32>);
     let (new_tag_input_sidebar, set_new_tag_input_sidebar) = signal(String::new());
+    
+    // Drag and drop state
+    let (dragging_tag_id, set_dragging_tag_id) = signal(None::<u32>);
+    let (drop_target_tag_id, set_drop_target_tag_id) = signal(None::<u32>);
+    let (reload_tags_trigger, set_reload_tags_trigger) = signal(0u32);
+
+    // Effect to reload tags when trigger changes
+    Effect::new(move |_| {
+        reload_tags_trigger.get(); // Track the trigger
+        if reload_tags_trigger.get_untracked() > 0 {
+            spawn_local(async move {
+                load_tags(set_all_tags).await;
+            });
+        }
+    });
 
     // Load initial state
     Effect::new(move || {
@@ -383,6 +405,11 @@ pub fn App() -> impl IntoView {
                         selected_tag_ids=selected_tag_ids
                         on_toggle=toggle_tag_selection
                         set_all_tags=set_all_tags
+                        dragging_tag_id=dragging_tag_id
+                        set_dragging_tag_id=set_dragging_tag_id
+                        drop_target_tag_id=drop_target_tag_id
+                        set_drop_target_tag_id=set_drop_target_tag_id
+                        set_reload_tags_trigger=set_reload_tags_trigger
                     />
                 </div>
 
@@ -464,19 +491,75 @@ pub fn App() -> impl IntoView {
                                             children=move |t| {
                                                 let tid = t.id;
                                                 let tname = t.name.clone();
+                                                
+                                                // Check if all selected files have this tag
+                                                let is_checked = move || {
+                                                    let files = selected_file_paths.get();
+                                                    if files.is_empty() {
+                                                        return false;
+                                                    }
+                                                    
+                                                    let tags_map = file_tags_map.get();
+                                                    let all_files_info = all_files.get();
+                                                    
+                                                    // Check if all selected files have this tag
+                                                    files.iter().all(|file_path| {
+                                                        // Find file by path
+                                                        if let Some(file_info) = all_files_info.iter().find(|f| &f.path == file_path) {
+                                                            // Check if file has this tag
+                                                            if let Some(file_tags) = tags_map.get(&file_info.id) {
+                                                                file_tags.iter().any(|tag| tag.id == tid)
+                                                            } else {
+                                                                false
+                                                            }
+                                                        } else {
+                                                            false
+                                                        }
+                                                    })
+                                                };
+                                                
                                                 view! {
                                                     <label class="tag-item">
                                                         <input
                                                             type="checkbox"
-                                                            on:change=move |_| {
+                                                            checked=is_checked
+                                                            on:change=move |e| {
+                                                                let checked = event_target_checked(&e);
                                                                 let ps = selected_file_paths.get();
-                                                                for p in &ps {
-                                                                    let pc = p.clone();
-                                                                    spawn_local(async move {
-                                                                        let args = AddFileTagArgs { file_path: pc, tag_id: tid };
-                                                                        let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                                    });
+                                                                
+                                                                if checked {
+                                                                    // Add tag to all selected files
+                                                                    for p in &ps {
+                                                                        let pc = p.clone();
+                                                                        spawn_local(async move {
+                                                                            let args = AddFileTagArgs { file_path: pc, tag_id: tid };
+                                                                            let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                                        });
+                                                                    }
+                                                                } else {
+                                                                    // Remove tag from all selected files
+                                                                    let all_files_info = all_files.get();
+                                                                    for p in &ps {
+                                                                        if let Some(file_info) = all_files_info.iter().find(|f| &f.path == p) {
+                                                                            let file_id = file_info.id;
+                                                                            spawn_local(async move {
+                                                                                let args = RemoveFileTagArgs { file_id, tag_id: tid };
+                                                                                let _ = invoke("remove_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                                            });
+                                                                        }
+                                                                    }
                                                                 }
+                                                                
+                                                                // Reload files after a short delay to batch updates
+                                                                spawn_local(async move {
+                                                                    // Simple delay using setTimeout
+                                                                    let promise = js_sys::Promise::new(&mut |resolve, _| {
+                                                                        let window = web_sys::window().unwrap();
+                                                                        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 100);
+                                                                    });
+                                                                    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+                                                                    load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
+                                                                });
                                                             }
                                                         />
                                                         <span style=t.color.map(|c| format!("color: {}", c)).unwrap_or_default()>{tname}</span>
@@ -517,6 +600,11 @@ fn TagTree(
     selected_tag_ids: ReadSignal<Vec<u32>>,
     on_toggle: impl Fn(u32) + 'static + Copy + Send,
     set_all_tags: WriteSignal<Vec<TagInfo>>,
+    dragging_tag_id: ReadSignal<Option<u32>>,
+    set_dragging_tag_id: WriteSignal<Option<u32>>,
+    drop_target_tag_id: ReadSignal<Option<u32>>,
+    set_drop_target_tag_id: WriteSignal<Option<u32>>,
+    set_reload_tags_trigger: WriteSignal<u32>,
 ) -> impl IntoView {
     let root_tags = move || {
         tags.get()
@@ -538,6 +626,11 @@ fn TagTree(
                             selected_tag_ids=selected_tag_ids
                             on_toggle=on_toggle
                             level=0
+                            dragging_tag_id=dragging_tag_id
+                            set_dragging_tag_id=set_dragging_tag_id
+                            drop_target_tag_id=drop_target_tag_id
+                            set_drop_target_tag_id=set_drop_target_tag_id
+                            set_reload_tags_trigger=set_reload_tags_trigger
                         />
                     }
                 }
@@ -553,6 +646,11 @@ fn TagNode(
     selected_tag_ids: ReadSignal<Vec<u32>>,
     on_toggle: impl Fn(u32) + 'static + Copy + Send,
     level: usize,
+    dragging_tag_id: ReadSignal<Option<u32>>,
+    set_dragging_tag_id: WriteSignal<Option<u32>>,
+    drop_target_tag_id: ReadSignal<Option<u32>>,
+    set_drop_target_tag_id: WriteSignal<Option<u32>>,
+    set_reload_tags_trigger: WriteSignal<u32>,
 ) -> AnyView {
     let tag_id = tag.id;
     let children = move || {
@@ -564,10 +662,65 @@ fn TagNode(
 
     let is_selected = move || selected_tag_ids.get().contains(&tag_id);
     let has_children = move || !children().is_empty();
+    
+    let is_dragging = move || dragging_tag_id.get() == Some(tag_id);
+    let is_drop_target = move || drop_target_tag_id.get() == Some(tag_id);
 
     view! {
-        <div class="tag-node" style=format!("margin-left: {}px", level * 20)>
-            <label class="tag-label">
+        <div 
+            class="tag-node" 
+            style=format!("margin-left: {}px", level * 20)
+            class:dragging=is_dragging
+            class:drop-target=is_drop_target
+        >
+            <label 
+                class="tag-label"
+                draggable="true"
+                on:dragstart=move |_| {
+                    set_dragging_tag_id.set(Some(tag_id));
+                }
+                on:dragenter=move |e| {
+                    e.prevent_default(); 
+                    if dragging_tag_id.get().is_some() {
+                        set_drop_target_tag_id.set(Some(tag_id));
+                    }
+                }
+                on:dragover=move |e| {
+                    e.prevent_default(); 
+                }
+                on:drop=move |e| {
+                    e.prevent_default();
+                    if let Some(dragged_id) = dragging_tag_id.get_untracked() {
+                        if dragged_id != tag_id {
+                            // Check for cycles
+                            let tags = all_tags.get_untracked();
+                            let mut is_descendant = false;
+                            let mut check_id = Some(tag_id);
+                            while let Some(curr) = check_id {
+                                if curr == dragged_id {
+                                    is_descendant = true;
+                                    break;
+                                }
+                                check_id = tags.iter().find(|t| t.id == curr).and_then(|t| t.parent_id);
+                            }
+
+                            if !is_descendant {
+                                spawn_local(async move {
+                                    let args = MoveTagArgs {
+                                        id: dragged_id,
+                                        new_parent_id: Some(tag_id),
+                                    };
+                                    let _ = invoke("move_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                    // Trigger tag reload
+                                    set_reload_tags_trigger.update(|v| *v += 1);
+                                });
+                            }
+                        }
+                    }
+                    set_dragging_tag_id.set(None);
+                    set_drop_target_tag_id.set(None);
+                }
+            >
                 <input
                     type="checkbox"
                     checked=is_selected
@@ -590,6 +743,11 @@ fn TagNode(
                                     selected_tag_ids=selected_tag_ids
                                     on_toggle=on_toggle
                                     level=level + 1
+                                    dragging_tag_id=dragging_tag_id
+                                    set_dragging_tag_id=set_dragging_tag_id
+                                    drop_target_tag_id=drop_target_tag_id
+                                    set_drop_target_tag_id=set_drop_target_tag_id
+                                    set_reload_tags_trigger=set_reload_tags_trigger
                                 />
                             }
                         }
