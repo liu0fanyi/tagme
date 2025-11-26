@@ -1,7 +1,13 @@
-use tauri::Manager;
+use tauri::{Manager, Emitter};
 use tauri_plugin_dialog::DialogExt;
 
+use std::sync::{Arc, Mutex};
+use notify::{Watcher, RecursiveMode, Event};
+
 mod db;
+
+// Global file watcher state
+static WATCHER: Mutex<Option<Arc<Mutex<notify::RecommendedWatcher>>>> = Mutex::new(None);
 
 // Window management commands
 #[tauri::command]
@@ -64,8 +70,14 @@ fn get_root_directory(app_handle: tauri::AppHandle) -> Option<String> {
 
 // File scanning commands
 #[tauri::command]
-fn scan_files(_app_handle: tauri::AppHandle, root_path: String) -> Result<Vec<db::FileListItem>, String> {
+fn scan_files(app_handle: tauri::AppHandle, root_path: String) -> Result<Vec<db::FileListItem>, String> {
     eprintln!("🎯 [TAURI] scan_files command called with path: {}", root_path);
+    
+    // Prune missing files first to keep DB in sync
+    if let Err(e) = db::prune_missing_files(&app_handle) {
+        eprintln!("⚠️ [TAURI] Warning: Failed to prune missing files: {}", e);
+    }
+
     let result = db::scan_directory_lightweight(root_path).map_err(|e| {
         let err_msg = e.to_string();
         eprintln!("❌ [TAURI] scan_files failed: {}", err_msg);
@@ -75,6 +87,66 @@ fn scan_files(_app_handle: tauri::AppHandle, root_path: String) -> Result<Vec<db
         eprintln!("✅ [TAURI] scan_files completed successfully");
     }
     result
+}
+
+// File watching commands
+#[tauri::command]
+fn start_watching(app_handle: tauri::AppHandle, root_path: String) -> Result<(), String> {
+    use notify::EventKind;
+    
+    eprintln!("🔍 [TAURI] start_watching called for: {}", root_path);
+    
+    // Stop any existing watcher first
+    let _ = stop_watching();
+    
+    let path = std::path::PathBuf::from(root_path.clone());
+    let app = app_handle.clone();
+    
+    let watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+        match res {
+            Ok(event) => {
+                eprintln!("📬 [WATCHER] Event received: {:?}", event);
+                // Only emit events for Create, Modify, and Remove
+                match event.kind {
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                        eprintln!("📁 [WATCHER] File change detected: {:?}, paths: {:?}", event.kind, event.paths);
+                        match app.emit("file-system-change", ()) {
+                            Ok(_) => eprintln!("✅ [WATCHER] Event emitted successfully"),
+                            Err(e) => eprintln!("❌ [WATCHER] Failed to emit event: {:?}", e),
+                        }
+                    },
+                    _ => {
+                        eprintln!("⏭️ [WATCHER] Ignoring event kind: {:?}", event.kind);
+                    }
+                }
+            }
+            Err(e) => eprintln!("❌ [WATCHER] Error: {:?}", e),
+        }
+    }).map_err(|e| e.to_string())?;
+    
+    let watcher_arc = Arc::new(Mutex::new(watcher));
+    
+    // Start watching
+    watcher_arc.lock().unwrap().watch(&path, RecursiveMode::NonRecursive)
+        .map_err(|e| e.to_string())?;
+    
+    // Store watcher globally
+    *WATCHER.lock().unwrap() = Some(watcher_arc);
+    
+    eprintln!("✅ [TAURI] File watching started for: {}", root_path);
+    eprintln!("📊 [TAURI] Watching mode: NonRecursive");
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_watching() -> Result<(), String> {
+    eprintln!("🛑 [TAURI] stop_watching called");
+    
+    let mut watcher_guard = WATCHER.lock().unwrap();
+    *watcher_guard = None;
+    
+    eprintln!("✅ [TAURI] File watching stopped");
+    Ok(())
 }
 
 #[tauri::command]
@@ -226,6 +298,8 @@ pub fn run() {
             select_root_directory,
             get_root_directory,
             scan_files,
+            start_watching,
+            stop_watching,
             get_all_files,
             create_tag,
             get_all_tags,

@@ -277,7 +277,8 @@ pub fn App() -> impl IntoView {
             let root: Option<String> = serde_wasm_bindgen::from_value(
                 invoke("get_root_directory", JsValue::NULL).await
             ).unwrap_or(None);
-            set_root_directory.set(root);
+            let _root = root.clone();
+            set_root_directory.set(_root );
 
             // Load tags
             load_tags(set_all_tags).await;
@@ -288,7 +289,75 @@ pub fn App() -> impl IntoView {
             // Load window state
             let state_value = invoke("load_window_state", JsValue::NULL).await;
             let _ = state_value; // Unused for now
+            
+            // Start watching if root directory exists
+            if let Some(watch_path) = root.clone() {
+                web_sys::console::log_1(&format!("🔍 [FRONTEND] Auto-starting watcher for saved directory: {}", watch_path).into());
+                spawn_local(async move {
+                    #[derive(Serialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct StartWatchingArgs {
+                        root_path: String,
+                    }
+                    
+                    let watch_args = StartWatchingArgs {
+                        root_path: watch_path.clone(),
+                    };
+                    web_sys::console::log_1(&format!("📡 [FRONTEND] Invoking start_watching for: {}", watch_path).into());
+                    let result = invoke("start_watching", serde_wasm_bindgen::to_value(&watch_args).unwrap()).await;
+                    web_sys::console::log_1(&format!("✅ [FRONTEND] Auto-start watcher result: {:?}", result).into());
+                });
+            } else {
+                web_sys::console::log_1(&"⚠️ [FRONTEND] No saved directory, skipping auto-start watcher".into());
+            }
+            
+            // Setup file system change listener
+            let setup_listener = js_sys::Function::new_no_args(r#"
+                console.log('🔧 [FRONTEND] Setting up Tauri event listener...');
+                if (window.__TAURI__ && window.__TAURI__.event) {
+                    window.__TAURI__.event.listen('file-system-change', () => {
+                        console.log('📬 [FRONTEND] File change detected by Tauri');
+                        window.dispatchEvent(new CustomEvent('tauri-fs-change'));
+                        console.log('✅ [FRONTEND] Custom event dispatched');
+                    });
+                    console.log('✅ [FRONTEND] Tauri event listener registered');
+                } else {
+                    console.error('❌ [FRONTEND] Tauri event API not available');
+                }
+            "#);
+            let _ = setup_listener.call0(&JsValue::NULL);
         });
+    });
+    
+    // Listen for custom file change events and trigger scan
+    Effect::new(move |_| {
+        let window = web_sys::window().expect("no window");
+        web_sys::console::log_1(&"🎧 [FRONTEND] Registering custom event listener for 'tauri-fs-change'".into());
+        let closure = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            web_sys::console::log_1(&"📥 [FRONTEND] Custom event received, refreshing file list...".into());
+            if let Some(path) = root_directory.get_untracked() {
+                web_sys::console::log_1(&format!("📂 [FRONTEND] Scanning path: {}", path).into());
+                set_scanning.set(true);
+                spawn_local(async move {
+                    let args = ScanFilesArgs { root_path: path };
+                    if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
+                        invoke("scan_files", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                    ) {
+                        web_sys::console::log_1(&format!("✅ [FRONTEND] Scan complete, {} files found", files.len()).into());
+                        set_scanned_files.set(files);
+                        // Refresh DB files as well (to reflect pruned files)
+                        load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
+                    }
+                    set_scanning.set(false);
+                });
+            } else {
+                web_sys::console::warn_1(&"⚠️ [FRONTEND] No root directory set, cannot scan".into());
+            }
+        }) as Box<dyn FnMut(_)>);
+        
+        let _ = window.add_event_listener_with_callback("tauri-fs-change", closure.as_ref().unchecked_ref());
+        web_sys::console::log_1(&"✅ [FRONTEND] Custom event listener registered".into());
+        closure.forget();
     });
 
     let select_directory = move |_| {
@@ -320,7 +389,27 @@ pub fn App() -> impl IntoView {
                 set_scanning.set(false);
                 if let Some(files) = scan_result {
                     set_scanned_files.set(files);
+                    // Refresh DB files as well
+                    load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
                 }
+                
+                // Start watching the directory for file changes
+                let watch_path = root_directory.get_untracked().unwrap_or_default();
+                web_sys::console::log_1(&format!("🔍 [FRONTEND] Starting watcher for: {}", watch_path).into());
+                spawn_local(async move {
+                    #[derive(Serialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct StartWatchingArgs {
+                        root_path: String,
+                    }
+                    
+                    let watch_args = StartWatchingArgs {
+                        root_path: watch_path.clone(),
+                    };
+                    web_sys::console::log_1(&format!("📡 [FRONTEND] Invoking start_watching for: {}", watch_path).into());
+                    let result = invoke("start_watching", serde_wasm_bindgen::to_value(&watch_args).unwrap()).await;
+                    web_sys::console::log_1(&format!("✅ [FRONTEND] start_watching result: {:?}", result).into());
+                });
             }
         });
     };
@@ -350,6 +439,8 @@ pub fn App() -> impl IntoView {
                 set_scanning.set(false);
                 if let Some(files) = result {
                     set_scanned_files.set(files);
+                    // Refresh DB files as well
+                    load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
                 }
             });
         }
@@ -917,8 +1008,14 @@ fn FileList(
                 </thead>
                 <tbody>
                     // Show scanned files first (not yet in DB)
+                    // Filter out files that are already in DB to avoid duplicates
                     <For
-                        each=move || scanned_files.get()
+                        each=move || {
+                            let db_paths: std::collections::HashSet<String> = db_files.get().iter().map(|f| f.path.clone()).collect();
+                            scanned_files.get().into_iter()
+                                .filter(move |f| !db_paths.contains(&f.path))
+                                .collect::<Vec<_>>()
+                        }
                         key=|file| file.path.clone()
                         children=move |file| {
                             let file_path = file.path.clone();

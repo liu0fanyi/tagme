@@ -254,6 +254,41 @@ pub fn scan_directory_lightweight(root_path: String) -> Result<Vec<FileListItem>
     Ok(scanned_files)
 }
 
+// Prune files from DB that no longer exist on disk
+pub fn prune_missing_files(app_handle: &AppHandle) -> Result<()> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    
+    // Get all files from DB
+    let mut stmt = conn.prepare("SELECT id, path FROM files")?;
+    let files_iter = stmt.query_map([], |row| {
+        Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut ids_to_delete = Vec::new();
+
+    for file_result in files_iter {
+        if let Ok((id, path)) = file_result {
+            if !Path::new(&path).exists() {
+                eprintln!("🗑️ File not found on disk, marking for deletion: {}", path);
+                ids_to_delete.push(id);
+            }
+        }
+    }
+
+    if !ids_to_delete.is_empty() {
+        eprintln!("🗑️ Pruning {} missing files from database...", ids_to_delete.len());
+        // Delete in batches or one by one
+        for id in ids_to_delete {
+            conn.execute("DELETE FROM files WHERE id = ?1", params![id])?;
+        }
+        eprintln!("✅ Pruning complete");
+    } else {
+        eprintln!("✨ No missing files found in database");
+    }
+
+    Ok(())
+}
+
 // Hash and insert file into database (called when tagging a file)
 // Returns file_id of existing or newly inserted file
 pub fn hash_and_insert_file(app_handle: &AppHandle, path: String) -> Result<u32> {
