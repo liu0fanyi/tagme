@@ -548,6 +548,10 @@ video {
   position: static;
 }
 
+.relative {
+  position: relative;
+}
+
 .table {
   display: table;
 }
@@ -1148,4 +1152,29 @@ body {
 
 .batch-tagging {
   margin-top: 16px;
+}
+
+/* Drag and drop visual feedback */
+
+.tag-label {
+  position: relative;
+}
+
+.tag-node.dragging>.tag-label {
+  opacity: 0.5;
+}
+
+.tag-node.drop-before>.tag-label {
+  border-top: 3px solid #7aa2f7;
+  padding-top: 3px;
+}
+
+.tag-node.drop-after>.tag-label {
+  border-bottom: 3px solid #7aa2f7;
+  padding-bottom: 3px
+}
+
+.tag-node.drop-child>.tag-label {
+  background: rgba(154, 206, 106, 0.2);
+  border: 2px solid #9ece6a;
 }

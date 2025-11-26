@@ -34,6 +34,7 @@ struct TagInfo {
     name: String,
     parent_id: Option<u32>,
     color: Option<String>,
+    position: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -73,6 +74,7 @@ struct DeleteTagArgs {
 struct MoveTagArgs {
     id: u32,
     new_parent_id: Option<u32>,
+    target_position: i32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -210,10 +212,46 @@ pub fn App() -> impl IntoView {
 
                         if !is_descendant {
                             web_sys::console::log_1(&format!("✅ Valid drop - moving tag {} under {}", dragged_id, target_id).into());
+
+                            // Calculate target position and parent based on drop position
+                            let tags = all_tags.get_untracked();
+                            let target_tag = tags.iter().find(|t| t.id == target_id);
+
+                            let (new_parent_id, target_position, action) = if let Some(tag) = target_tag {
+                                if pos < 0.25 {
+                                    // Insert before target tag (same parent)
+                                    if tag.parent_id == tags.iter().find(|t| t.id == dragged_id).and_then(|t| t.parent_id) {
+                                        // Moving within same parent - need special handling
+                                        let current_pos = tags.iter().find(|t| t.id == dragged_id).map(|t| t.position).unwrap_or(0);
+                                        if current_pos < tag.position {
+                                            // Moving forward, use target's position
+                                            (tag.parent_id, tag.position, "before-same-parent")
+                                        } else {
+                                            // Moving backward, use target's position
+                                            (tag.parent_id, tag.position, "before-same-parent")
+                                        }
+                                    } else {
+                                        // Moving to different parent
+                                        (tag.parent_id, tag.position, "before")
+                                    }
+                                } else if pos > 0.75 {
+                                    // Insert after target tag (same parent)
+                                    (tag.parent_id, tag.position + 1, "after")
+                                } else {
+                                    // As child of target tag
+                                    (Some(target_id), 0, "child")
+                                }
+                            } else {
+                                (None, 0, "root")
+                            };
+
+                            web_sys::console::log_1(&format!("🎯 Action: {}, Parent: {:?}, Position: {}", action, new_parent_id, target_position).into());
+
                             spawn_local(async move {
                                 let args = MoveTagArgs {
                                     id: dragged_id,
-                                    new_parent_id: Some(target_id),
+                                    new_parent_id,
+                                    target_position,
                                 };
                                 let _ = invoke("move_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
                                 // Trigger reload
@@ -940,10 +978,14 @@ fn FileList(
 async fn load_tags(set_all_tags: WriteSignal<Vec<TagInfo>>) {
     web_sys::console::log_1(&"Loading tags...".into());
     let tags_val = invoke("get_all_tags", JsValue::NULL).await;
-    
+
     match serde_wasm_bindgen::from_value::<Vec<TagInfo>>(tags_val) {
         Ok(tags) => {
             web_sys::console::log_1(&format!("Loaded {} tags", tags.len()).into());
+            for tag in &tags {
+                web_sys::console::log_1(&format!("   Frontend - Tag: {}, ID: {}, Parent: {:?}, Pos: {}",
+                    tag.name, tag.id, tag.parent_id, tag.position).into());
+            }
             set_all_tags.set(tags);
         },
         Err(e) => {

@@ -98,8 +98,8 @@ fn delete_tag(app_handle: tauri::AppHandle, id: u32) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn move_tag(app_handle: tauri::AppHandle, id: u32, new_parent_id: Option<u32>) -> Result<(), String> {
-    db::move_tag(&app_handle, id, new_parent_id).map_err(|e| e.to_string())
+fn move_tag(app_handle: tauri::AppHandle, id: u32, new_parent_id: Option<u32>, target_position: i32) -> Result<(), String> {
+    db::move_tag(&app_handle, id, new_parent_id, target_position).map_err(|e| e.to_string())
 }
 
 // File-tag relationship commands

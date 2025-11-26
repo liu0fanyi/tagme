@@ -31,6 +31,7 @@ pub struct TagInfo {
     pub name: String,
     pub parent_id: Option<u32>,
     pub color: Option<String>,
+    pub position: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -77,10 +78,27 @@ pub fn init_db(app_handle: &AppHandle) -> Result<()> {
             name TEXT NOT NULL,
             parent_id INTEGER,
             color TEXT,
+            position INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             FOREIGN KEY (parent_id) REFERENCES tags(id) ON DELETE CASCADE,
             UNIQUE(name, parent_id)
         )",
+        [],
+    )?;
+
+    // Migration: Add position column if it doesn't exist
+    let _ = conn.execute(
+        "ALTER TABLE tags ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+
+    // Initialize positions for existing tags (group by parent_id)
+    conn.execute(
+        "UPDATE tags SET position = (
+            SELECT COUNT(*) FROM tags t2 
+            WHERE (t2.parent_id IS tags.parent_id OR (t2.parent_id IS NULL AND tags.parent_id IS NULL))
+            AND t2.id < tags.id
+        ) WHERE position = 0",
         [],
     )?;
 
@@ -342,9 +360,18 @@ pub fn create_tag(
         .unwrap()
         .as_secs() as i64;
 
+    // Get max position for this parent
+    let max_position: i32 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) FROM tags WHERE parent_id IS ?1",
+        params![parent_id],
+        |row| row.get(0),
+    ).unwrap_or(-1);
+    
+    let new_position = max_position + 1;
+
     conn.execute(
-        "INSERT INTO tags (name, parent_id, color, created_at) VALUES (?1, ?2, ?3, ?4)",
-        params![name, parent_id, color, now],
+        "INSERT INTO tags (name, parent_id, color, position, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![name, parent_id, color, new_position, now],
     )?;
 
     Ok(conn.last_insert_rowid() as u32)
@@ -353,7 +380,7 @@ pub fn create_tag(
 pub fn get_all_tags(app_handle: &AppHandle) -> Result<Vec<TagInfo>> {
     eprintln!("🏷️  [DB] get_all_tags called");
     let conn = Connection::open(get_db_path(app_handle))?;
-    let mut stmt = conn.prepare("SELECT id, name, parent_id, color FROM tags ORDER BY name")?;
+    let mut stmt = conn.prepare("SELECT id, name, parent_id, color, position FROM tags ORDER BY parent_id, position")?;
 
     let tags = stmt
         .query_map([], |row| {
@@ -362,13 +389,15 @@ pub fn get_all_tags(app_handle: &AppHandle) -> Result<Vec<TagInfo>> {
                 name: row.get(1)?,
                 parent_id: row.get(2)?,
                 color: row.get(3)?,
+                position: row.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     eprintln!("🏷️  [DB] Found {} tags", tags.len());
     for tag in &tags {
-        eprintln!("   - Tag: {}, Parent: {:?}", tag.name, tag.parent_id);
+        eprintln!("   - DB: Tag: {}, ID: {}, Parent: {:?}, Pos: {}",
+            tag.name, tag.id, tag.parent_id, tag.position);
     }
     Ok(tags)
 }
@@ -393,12 +422,91 @@ pub fn delete_tag(app_handle: &AppHandle, id: u32) -> Result<()> {
     Ok(())
 }
 
-pub fn move_tag(app_handle: &AppHandle, id: u32, new_parent_id: Option<u32>) -> Result<()> {
-    let conn = Connection::open(get_db_path(app_handle))?;
-    conn.execute(
-        "UPDATE tags SET parent_id = ?1 WHERE id = ?2",
-        params![new_parent_id, id],
+// Helper function to reorder tags after a move
+fn reorder_tags_in_parent(conn: &Connection, parent_id: Option<u32>) -> Result<()> {
+    eprintln!("🔧 [DB] reorder_tags_in_parent: parent={:?}", parent_id);
+    // Get all tags in this parent, ordered by current position
+    let mut stmt = conn.prepare(
+        "SELECT id FROM tags WHERE parent_id IS ?1 ORDER BY position"
     )?;
+
+    let tag_ids: Vec<u32> = stmt
+        .query_map(params![parent_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    eprintln!("🔧 [DB] Found {} tags to reorder: {:?}", tag_ids.len(), tag_ids);
+
+    // Reassign positions sequentially
+    for (index, tag_id) in tag_ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE tags SET position = ?1 WHERE id = ?2",
+            params![index as i32, tag_id],
+        )?;
+    }
+
+    eprintln!("🔧 [DB] Reorder completed for parent {:?}", parent_id);
+    Ok(())
+}
+
+pub fn move_tag(
+    app_handle: &AppHandle,
+    id: u32,
+    new_parent_id: Option<u32>,
+    target_position: i32,
+) -> Result<()> {
+    eprintln!("🔄 [DB] move_tag called: id={}, new_parent={:?}, target_pos={}", id, new_parent_id, target_position);
+    let conn = Connection::open(get_db_path(app_handle))?;
+
+    // Get current parent
+    let old_parent_id: Option<u32> = conn.query_row(
+        "SELECT parent_id FROM tags WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )?;
+
+    eprintln!("🔄 [DB] Current parent of tag {}: {:?}", id, old_parent_id);
+
+    // If moving within the same parent, shift positions of affected tags
+    if old_parent_id == new_parent_id {
+        eprintln!("🔄 [DB] Moving within same parent, shifting positions");
+        let current_pos: i32 = conn.query_row(
+            "SELECT position FROM tags WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+
+        if current_pos < target_position {
+            // Moving forward: shift tags between current_pos+1 and target_position down by 1
+            conn.execute(
+                "UPDATE tags SET position = position - 1 WHERE parent_id IS ?1 AND position > ?2 AND position <= ?3 AND id != ?4",
+                params![new_parent_id, current_pos, target_position, id],
+            )?;
+        } else if current_pos > target_position {
+            // Moving backward: shift tags between target_position and current_pos-1 up by 1
+            conn.execute(
+                "UPDATE tags SET position = position + 1 WHERE parent_id IS ?1 AND position >= ?2 AND position < ?3 AND id != ?4",
+                params![new_parent_id, target_position, current_pos, id],
+            )?;
+        }
+    }
+
+    // Update parent and position
+    conn.execute(
+        "UPDATE tags SET parent_id = ?1, position = ?2 WHERE id = ?3",
+        params![new_parent_id, target_position, id],
+    )?;
+
+    eprintln!("🔄 [DB] Updated tag {} to parent {:?}, position {}", id, new_parent_id, target_position);
+
+    // Reorder tags in both old and new parents (only if different parents)
+    if old_parent_id != new_parent_id {
+        eprintln!("🔄 [DB] Reordering old parent {:?}", old_parent_id);
+        reorder_tags_in_parent(&conn, old_parent_id)?;
+        eprintln!("🔄 [DB] Reordering new parent {:?}", new_parent_id);
+        reorder_tags_in_parent(&conn, new_parent_id)?;
+    }
+
+    eprintln!("🔄 [DB] move_tag completed successfully");
     Ok(())
 }
 
@@ -436,9 +544,9 @@ pub fn remove_file_tag(app_handle: &AppHandle, file_id: u32, tag_id: u32) -> Res
 pub fn get_file_tags(app_handle: &AppHandle, file_id: u32) -> Result<Vec<TagInfo>> {
     let conn = Connection::open(get_db_path(app_handle))?;
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.name, t.parent_id, t.color 
-         FROM tags t 
-         JOIN file_tags ft ON t.id = ft.tag_id 
+        "SELECT t.id, t.name, t.parent_id, t.color, t.position
+         FROM tags t
+         JOIN file_tags ft ON t.id = ft.tag_id
          WHERE ft.file_id = ?1
          ORDER BY t.name",
     )?;
@@ -450,6 +558,7 @@ pub fn get_file_tags(app_handle: &AppHandle, file_id: u32) -> Result<Vec<TagInfo
                 name: row.get(1)?,
                 parent_id: row.get(2)?,
                 color: row.get(3)?,
+                position: row.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
