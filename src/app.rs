@@ -168,6 +168,7 @@ pub fn App() -> impl IntoView {
     let (drop_target_tag_id, set_drop_target_tag_id) = signal(None::<u32>);
     let (drop_position, set_drop_position) = signal(0.5f64); // 0.0=top, 1.0=bottom
     let (reload_tags_trigger, set_reload_tags_trigger) = signal(0u32);
+    let (last_click_time, set_last_click_time) = signal(0.0);
 
     // Global mouse up handler for drag and drop
     Effect::new(move |_| {
@@ -360,11 +361,19 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let start_drag = move |_| {
+    let minimize = move |_| {
         spawn_local(async move {
-            let _ = invoke("start_drag", JsValue::NULL).await;
+            let _ = invoke("minimize_window", JsValue::NULL).await;
         });
     };
+
+    let toggle_maximize = move |_| {
+        spawn_local(async move {
+            let _ = invoke("toggle_maximize", JsValue::NULL).await;
+        });
+    };
+
+
 
     let toggle_tag_selection = move |tag_id: u32| {
         let mut current = selected_tag_ids.get();
@@ -431,19 +440,46 @@ pub fn App() -> impl IntoView {
 
     view! {
         <div class="app">
-            <div class="header" on:mousedown=move |e| {
-                // Only start drag if not clicking on buttons
-                let target = e.target();
-                if let Some(element) = target.and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
-                    let tag_name = element.tag_name().to_lowercase();
-                    if tag_name != "button" {
-                        start_drag(e);
+            <div class="header"
+                on:mousedown=move |e| {
+                    let now = js_sys::Date::now();
+                    let last = last_click_time.get_untracked();
+                    set_last_click_time.set(now);
+
+                    let target = e.target();
+                    if let Some(element) = target.and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) {
+                        // Check if clicking on a button or inside a button
+                        if element.closest("button").ok().flatten().is_none() {
+                            if now - last < 300.0 {
+                                // Double click detected
+                                toggle_maximize(());
+                            } else {
+                                // Single click - start drag
+                                spawn_local(async move {
+                                    let _ = invoke("start_drag", JsValue::NULL).await;
+                                });
+                            }
+                        }
                     }
                 }
-            }>
+            >
                 <h1>"TagMe"</h1>
                 <div class="header-buttons">
-                    <button on:click=close class="header-btn" title="Close">"×"</button>
+                    <button on:click=move |_| minimize(()) class="header-btn" title="Minimize">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
+                            <path d="M19 13H5v-2h14v2z"/>
+                        </svg>
+                    </button>
+                    <button on:click=move |_| toggle_maximize(()) class="header-btn" title="Maximize/Restore">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
+                            <path d="M4 4h16v16H4V4zm2 2v12h12V6H6z"/>
+                        </svg>
+                    </button>
+                    <button on:click=move |_| close(()) class="header-btn" title="Close">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
+                            <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                        </svg>
+                    </button>
                 </div>
             </div>
 
@@ -467,7 +503,7 @@ pub fn App() -> impl IntoView {
                         tags=all_tags
                         selected_tag_ids=selected_tag_ids
                         on_toggle=toggle_tag_selection
-                        set_all_tags=set_all_tags
+                        _set_all_tags=set_all_tags
                         dragging_tag_id=dragging_tag_id
                         set_dragging_tag_id=set_dragging_tag_id
                         drop_target_tag_id=drop_target_tag_id
@@ -658,7 +694,7 @@ fn TagTree(
     tags: ReadSignal<Vec<TagInfo>>,
     selected_tag_ids: ReadSignal<Vec<u32>>,
     on_toggle: impl Fn(u32) + 'static + Copy + Send,
-    set_all_tags: WriteSignal<Vec<TagInfo>>,
+    _set_all_tags: WriteSignal<Vec<TagInfo>>,
     dragging_tag_id: ReadSignal<Option<u32>>,
     set_dragging_tag_id: WriteSignal<Option<u32>>,
     drop_target_tag_id: ReadSignal<Option<u32>>,
@@ -728,8 +764,8 @@ fn TagNode(
     let is_selected = move || selected_tag_ids.get().contains(&tag_id);
     let has_children = move || !children().is_empty();
     
-    let is_dragging = move || dragging_tag_id.get() == Some(tag_id);
-    let is_drop_target = move || drop_target_tag_id.get() == Some(tag_id);
+    let _is_dragging = move || dragging_tag_id.get() == Some(tag_id);
+    let _is_drop_target = move || drop_target_tag_id.get() == Some(tag_id);
 
     // Mouse down - start drag
     let on_mousedown = move |ev: web_sys::MouseEvent| {

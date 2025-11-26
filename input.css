@@ -50,6 +50,7 @@ body {
     border-bottom: 1px solid var(--border-color);
     cursor: move;
     user-select: none;
+    z-index: 50;
 }
 
 .header h1 {
@@ -73,6 +74,11 @@ body {
     padding: 4px 8px;
     border-radius: 4px;
     transition: background 0.2s;
+    min-width: 32px;
+    min-height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .header-btn:hover {
@@ -580,6 +586,7 @@ body {
 .batch-tagging {
     margin-top: 16px;
 }
+
 /* Drag and drop visual feedback */
 .tag-label {
     position: relative;

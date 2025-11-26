@@ -18,8 +18,24 @@ fn close_window(window: tauri::Window) {
 }
 
 #[tauri::command]
+fn minimize_window(window: tauri::Window) {
+    let _ = window.minimize();
+}
+
+#[tauri::command]
 fn start_drag(window: tauri::Window) {
     let _ = window.start_dragging();
+}
+
+#[tauri::command]
+fn toggle_maximize(window: tauri::Window) {
+    if let Ok(is_maximized) = window.is_maximized() {
+        if is_maximized {
+            let _ = window.unmaximize();
+        } else {
+            let _ = window.maximize();
+        }
+    }
 }
 
 // Root directory commands
@@ -197,7 +213,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_always_on_top,
             close_window,
+            minimize_window,
             start_drag,
+            toggle_maximize,
             select_root_directory,
             get_root_directory,
             scan_files,
