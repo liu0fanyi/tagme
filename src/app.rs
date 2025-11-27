@@ -43,6 +43,31 @@ struct FileWithTags {
     tags: Vec<TagInfo>,
 }
 
+#[derive(Clone, Debug, PartialEq, Copy)]
+enum SortColumn {
+    Name,
+    Size,
+    Date,
+    Type,
+}
+
+#[derive(Clone, Debug, PartialEq, Copy)]
+enum SortDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DisplayFile {
+    path: String,
+    name: String,
+    extension: String,
+    size_bytes: u64,
+    last_modified: i64,
+    db_id: Option<u32>,
+    tags: Vec<TagInfo>,
+}
+
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,6 +187,89 @@ pub fn App() -> impl IntoView {
     let (new_tag_name, set_new_tag_name) = signal(String::new());
     let (new_tag_parent, set_new_tag_parent) = signal(None::<u32>);
     let (new_tag_input_sidebar, set_new_tag_input_sidebar) = signal(String::new());
+    
+    // Sorting state
+    let (sort_column, set_sort_column) = signal(SortColumn::Name);
+    let (sort_direction, set_sort_direction) = signal(SortDirection::Asc);
+
+    // Derived signal for sorted files
+    let sorted_files = move || {
+        let scanned = scanned_files.get();
+        let db = displayed_files.get();
+        let tags_map = file_tags_map.get();
+        
+        let mut display_files: Vec<DisplayFile> = Vec::new();
+        let mut seen_paths = std::collections::HashSet::new();
+
+        // Add DB files first
+        for file in db {
+            let path_obj = std::path::Path::new(&file.path);
+            let name = path_obj.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let extension = path_obj.extension().unwrap_or_default().to_string_lossy().to_string();
+            
+            seen_paths.insert(file.path.clone());
+            display_files.push(DisplayFile {
+                path: file.path.clone(),
+                name,
+                extension,
+                size_bytes: file.size_bytes,
+                last_modified: file.last_modified,
+                db_id: Some(file.id),
+                tags: tags_map.get(&file.id).cloned().unwrap_or_default(),
+            });
+        }
+
+        // Add scanned files that are not in DB
+        for file in scanned {
+            if !seen_paths.contains(&file.path) {
+                let path_obj = std::path::Path::new(&file.path);
+                let name = path_obj.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let extension = path_obj.extension().unwrap_or_default().to_string_lossy().to_string();
+                
+                display_files.push(DisplayFile {
+                    path: file.path,
+                    name,
+                    extension,
+                    size_bytes: file.size_bytes,
+                    last_modified: file.last_modified,
+                    db_id: None,
+                    tags: Vec::new(),
+                });
+            }
+        }
+
+        // Sort
+        let col = sort_column.get();
+        let dir = sort_direction.get();
+        
+        display_files.sort_by(|a, b| {
+            let cmp = match col {
+                SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortColumn::Size => a.size_bytes.cmp(&b.size_bytes),
+                SortColumn::Date => a.last_modified.cmp(&b.last_modified),
+                SortColumn::Type => a.extension.to_lowercase().cmp(&b.extension.to_lowercase()),
+            };
+            
+            match dir {
+                SortDirection::Asc => cmp,
+                SortDirection::Desc => cmp.reverse(),
+            }
+        });
+
+        display_files
+    };
+
+    let toggle_sort = move |col: SortColumn| {
+        if sort_column.get() == col {
+            set_sort_direction.update(|d| *d = match d {
+                SortDirection::Asc => SortDirection::Desc,
+                SortDirection::Desc => SortDirection::Asc,
+            });
+        } else {
+            set_sort_column.set(col);
+            set_sort_direction.set(SortDirection::Asc);
+        }
+    };
     
     // Drag and drop state
     let (dragging_tag_id, set_dragging_tag_id) = signal(None::<u32>);
@@ -502,7 +610,7 @@ pub fn App() -> impl IntoView {
         set_selected_file_paths.set(current);
     };
 
-    let add_tag_to_selected_files = move |tag_id: u32| {
+    let _add_tag_to_selected_files = move |tag_id: u32| {
         let file_paths = selected_file_paths.get();
         for file_path in file_paths {
             spawn_local(async move {
@@ -628,11 +736,12 @@ pub fn App() -> impl IntoView {
                         </div>
                     </div>
                     <FileList
-                        scanned_files=scanned_files
-                        db_files=displayed_files
-                        file_tags_map=file_tags_map
+                        files=sorted_files
                         selected_file_paths=selected_file_paths
                         on_toggle=toggle_file_selection
+                        sort_column=sort_column
+                        sort_direction=sort_direction
+                        on_sort=toggle_sort
                     />
                 </div>
 
@@ -988,34 +1097,48 @@ fn TagNode(
 
 #[component]
 fn FileList(
-    scanned_files: ReadSignal<Vec<FileListItem>>,
-    db_files: ReadSignal<Vec<FileInfo>>,
-    file_tags_map: ReadSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
+    files: impl Fn() -> Vec<DisplayFile> + 'static + Send,
     selected_file_paths: ReadSignal<Vec<String>>,
     on_toggle: impl Fn(String) + 'static + Copy + Send,
+    sort_column: ReadSignal<SortColumn>,
+    sort_direction: ReadSignal<SortDirection>,
+    on_sort: impl Fn(SortColumn) + 'static + Copy + Send,
 ) -> impl IntoView {
+    let sort_indicator = move |col: SortColumn| {
+        if sort_column.get() == col {
+            match sort_direction.get() {
+                SortDirection::Asc => " ▲",
+                SortDirection::Desc => " ▼",
+            }
+        } else {
+            ""
+        }
+    };
+
     view! {
         <div class="file-list">
             <table>
                 <thead>
                     <tr>
                         <th></th>
-                        <th>"File Path"</th>
-                        <th>"Size"</th>
-                        <th>"Modified"</th>
+                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Name)>
+                            "File Name" {move || sort_indicator(SortColumn::Name)}
+                        </th>
+                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Type)>
+                            "Type" {move || sort_indicator(SortColumn::Type)}
+                        </th>
+                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Size)>
+                            "Size" {move || sort_indicator(SortColumn::Size)}
+                        </th>
+                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Date)>
+                            "Modified" {move || sort_indicator(SortColumn::Date)}
+                        </th>
                         <th>"Tags"</th>
                     </tr>
                 </thead>
                 <tbody>
-                    // Show scanned files first (not yet in DB)
-                    // Filter out files that are already in DB to avoid duplicates
                     <For
-                        each=move || {
-                            let db_paths: std::collections::HashSet<String> = db_files.get().iter().map(|f| f.path.clone()).collect();
-                            scanned_files.get().into_iter()
-                                .filter(move |f| !db_paths.contains(&f.path))
-                                .collect::<Vec<_>>()
-                        }
+                        each=files
                         key=|file| file.path.clone()
                         children=move |file| {
                             let file_path = file.path.clone();
@@ -1023,65 +1146,47 @@ fn FileList(
                             let file_path_for_class = file_path.clone();
                             let file_path_for_checked = file_path.clone();
                             
-                            view! {
-                                <tr class:selected=move || selected_file_paths.get().contains(&file_path_for_class)>
-                                    <td>
-                                        <input
-                                            type="checkbox"
-                                            checked=move || selected_file_paths.get().contains(&file_path_for_checked)
-                                            on:change=move |_| on_toggle(file_path_for_toggle.clone())
-                                        />
-                                    </td>
-                                    <td class="file-path" title=file.path.clone()>{file.path.clone()}</td>
-                                    <td>{format_file_size(file.size_bytes)}</td>
-                                    <td>{format_timestamp(file.last_modified)}</td>
-                                    <td class="file-tags">
-                                        <span class="not-in-db">"Not tagged yet"</span>
-                                    </td>
-                                </tr>
-                            }
-                        }
-                    />
-                    
-                    // Show DB files (already tagged)
-                    <For
-                        each=move || db_files.get()
-                        key=|file| file.id
-                        children=move |file| {
-                            let file_path = file.path.clone();
-                            let file_path_for_toggle = file_path.clone();
-                            let file_path_for_class = file_path.clone();
-                            let file_path_for_checked = file_path.clone();
-                            let file_id = file.id;
-                            let file_tags = move || file_tags_map.get().get(&file_id).cloned().unwrap_or_default();
-                            
-                            view! {
-                                <tr class:selected=move || selected_file_paths.get().contains(&file_path_for_class)>
-                                    <td>
-                                        <input
-                                            type="checkbox"
-                                            checked=move || selected_file_paths.get().contains(&file_path_for_checked)
-                                            on:change=move |_| on_toggle(file_path_for_toggle.clone())
-                                        />
-                                    </td>
-                                    <td class="file-path" title=file.path.clone()>{file.path.clone()}</td>
-                                    <td>{format_file_size(file.size_bytes)}</td>
-                                    <td>{format_timestamp(file.last_modified)}</td>
-                                    <td class="file-tags">
-                                        <For
-                                            each=file_tags
-                                            key=|tag| tag.id
-                                            children=move |tag| {
+                                    let tags_check = file.tags.clone();
+                                    let tags_loop = file.tags.clone();
+                                    
+                                    view! {
+                                        <tr class:selected=move || selected_file_paths.get().contains(&file_path_for_class)>
+                                            <td>
+                                                <input
+                                                    type="checkbox"
+                                                    checked=move || selected_file_paths.get().contains(&file_path_for_checked)
+                                                    on:change=move |_| on_toggle(file_path_for_toggle.clone())
+                                                />
+                                            </td>
+                                            <td class="file-path" title=file.path.clone()>{file.name.clone()}</td>
+                                            <td>{file.extension.clone()}</td>
+                                            <td>{format_file_size(file.size_bytes)}</td>
+                                            <td>{format_timestamp(file.last_modified)}</td>
+                                            <td class="file-tags">
+                                                <Show
+                                                    when=move || !tags_check.is_empty()
+                                                    fallback=|| view! { <span class="not-in-db">"Not tagged"</span> }
+                                                >
+                                            {
+                                                let tags_inner = tags_loop.clone();
                                                 view! {
-                                                    <span class="tag-badge" style=move || tag.color.clone().map(|c| format!("background-color: {}", c)).unwrap_or_default()>
-                                                        {tag.name.clone()}
-                                                    </span>
+                                                    <For
+                                                        each=move || tags_inner.clone()
+                                                        key=|tag| tag.id
+                                                        children=move |tag| {
+                                                            view! {
+                                                                <span class="tag-badge" style=move || tag.color.clone().map(|c| format!("background-color: {}", c)).unwrap_or_default()>
+                                                                    {tag.name.clone()}
+                                                                </span>
+                                                            }
+                                                        }
+                                                    />
                                                 }
                                             }
-                                        />
-                                    </td>
-                                </tr>
-                            }
+                                                </Show>
+                                            </td>
+                                        </tr>
+                                    }
                         }
                     />
                 </tbody>
