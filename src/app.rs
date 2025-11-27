@@ -190,6 +190,7 @@ pub fn App() -> impl IntoView {
     let (displayed_files, set_displayed_files) = signal(Vec::<FileInfo>::new());
     let (file_tags_map, set_file_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
     let (selected_file_paths, set_selected_file_paths) = signal(Vec::<String>::new());
+    let (last_selected_file_path, set_last_selected_file_path) = signal(None::<String>);
     let (scanning, set_scanning) = signal(false);
     let (show_add_tag_dialog, set_show_add_tag_dialog) = signal(false);
     let (new_tag_name, set_new_tag_name) = signal(String::new());
@@ -903,6 +904,9 @@ pub fn App() -> impl IntoView {
                         sort_column=sort_column
                         sort_direction=sort_direction
                         on_sort=toggle_sort
+                        set_selected_file_paths=set_selected_file_paths
+                        last_selected_file_path=last_selected_file_path
+                        set_last_selected_file_path=set_last_selected_file_path
                     />
                 </div>
 
@@ -1426,6 +1430,9 @@ fn GroupedFileList(
     sort_column: ReadSignal<SortColumn>,
     sort_direction: ReadSignal<SortDirection>,
     on_sort: impl Fn(SortColumn) + 'static + Copy + Send + Sync,
+    set_selected_file_paths: WriteSignal<Vec<String>>,
+    last_selected_file_path: ReadSignal<Option<String>>,
+    set_last_selected_file_path: WriteSignal<Option<String>>,
 ) -> impl IntoView {
     fn is_under_root(file_path: &str, root: &str) -> bool {
         let mut r = root.replace('/', "\\").to_lowercase();
@@ -1477,6 +1484,8 @@ fn GroupedFileList(
                                         children=move |grp: (String, Vec<DisplayFile>)| {
                                             let r = grp.0.clone();
                                             let group_files = grp.1.clone();
+                                            let group_files_value = group_files.clone();
+                                            let group_paths = std::sync::Arc::new(group_files.iter().map(|f| f.path.clone()).collect::<Vec<String>>());
                                             let group_files_for_empty = group_files.clone();
                                             view! {
                                                 <div class="file-group">
@@ -1502,7 +1511,7 @@ fn GroupedFileList(
                                                         </thead>
                                                         <tbody>
                                                             <For
-                                                                each=move || group_files.clone()
+                                                                each=move || group_files_value.clone()
                                                                 key=|file| file.path.clone()
                                                                 children=move |file| {
                                                                     let file_path = file.path.clone();
@@ -1526,8 +1535,35 @@ fn GroupedFileList(
                                                                             <td on:dblclick=|e| e.stop_propagation()>
                                                                                 <input
                                                                                     type="checkbox"
-                                                                                    checked=move || selected_file_paths.get().contains(&file_path_for_checked)
-                                                                                    on:change=move |_| on_toggle(file_path_for_toggle.clone())
+                                                                                    prop:checked=move || selected_file_paths.get().contains(&file_path_for_checked)
+                                                                                    on:click={
+                                                                                        let value = group_paths.clone();
+                                                                                        move |ev: web_sys::MouseEvent| {
+                                                                                            let shift = ev.shift_key();
+                                                                                            if shift {
+                                                                                                let anchor = last_selected_file_path.get();
+                                                                                                let current = file_path_for_toggle.clone();
+                                                                                                let paths = (*value).clone();
+                                                                                                if let Some(a) = anchor {
+                                                                                                    let i1 = paths.iter().position(|p| p == &a);
+                                                                                                    let i2 = paths.iter().position(|p| p == &current);
+                                                                                                    if let (Some(s1), Some(s2)) = (i1, i2) {
+                                                                                                        let (s, e) = if s1 <= s2 { (s1, s2) } else { (s2, s1) };
+                                                                                                        let range = paths[s..=e].to_vec();
+                                                                                                        set_selected_file_paths.set(range);
+                                                                                                    } else {
+                                                                                                        set_selected_file_paths.set(vec![current.clone()]);
+                                                                                                    }
+                                                                                                } else {
+                                                                                                    set_selected_file_paths.set(vec![current.clone()]);
+                                                                                                }
+                                                                                                set_last_selected_file_path.set(Some(current));
+                                                                                            } else {
+                                                                                                on_toggle(file_path_for_toggle.clone());
+                                                                                                set_last_selected_file_path.set(Some(file_path_for_toggle.clone()));
+                                                                                            }
+                                                                                        }
+                                                                                    }
                                                                                 />
                                                                             </td>
                                                                             <td class="file-path" title=file.path.clone()>
@@ -1579,6 +1615,8 @@ fn GroupedFileList(
                     >
                         {
                             let all_clone = all.clone();
+                            let all_value = all_clone.clone();
+                            let all_paths = std::sync::Arc::new(all_clone.iter().map(|f| f.path.clone()).collect::<Vec<String>>());
                             view! {
                                 <div>
                                 <table>
@@ -1602,7 +1640,7 @@ fn GroupedFileList(
                                     </thead>
                                     <tbody>
                                         <For
-                                            each=move || all_clone.clone()
+                                            each=move || all_value.clone()
                                             key=|file| file.path.clone()
                                             children=move |file| {
                                                 let file_path = file.path.clone();
@@ -1626,8 +1664,35 @@ fn GroupedFileList(
                                                         <td on:dblclick=|e| e.stop_propagation()>
                                                             <input
                                                                 type="checkbox"
-                                                                checked=move || selected_file_paths.get().contains(&file_path_for_checked)
-                                                                on:change=move |_| on_toggle(file_path_for_toggle.clone())
+                                                                prop:checked=move || selected_file_paths.get().contains(&file_path_for_checked)
+                                                                on:click={
+                                                                    let value = all_paths.clone();
+                                                                    move |ev: web_sys::MouseEvent| {
+                                                                        let shift = ev.shift_key();
+                                                                        if shift {
+                                                                            let anchor = last_selected_file_path.get();
+                                                                            let current = file_path_for_toggle.clone();
+                                                                            let paths = (*value).clone();
+                                                                            if let Some(a) = anchor {
+                                                                                let i1 = paths.iter().position(|p| p == &a);
+                                                                                let i2 = paths.iter().position(|p| p == &current);
+                                                                                if let (Some(s1), Some(s2)) = (i1, i2) {
+                                                                                    let (s, e) = if s1 <= s2 { (s1, s2) } else { (s2, s1) };
+                                                                                    let range = paths[s..=e].to_vec();
+                                                                                    set_selected_file_paths.set(range);
+                                                                                } else {
+                                                                                    set_selected_file_paths.set(vec![current.clone()]);
+                                                                                }
+                                                                            } else {
+                                                                                set_selected_file_paths.set(vec![current.clone()]);
+                                                                            }
+                                                                            set_last_selected_file_path.set(Some(current));
+                                                                        } else {
+                                                                            on_toggle(file_path_for_toggle.clone());
+                                                                            set_last_selected_file_path.set(Some(file_path_for_toggle.clone()));
+                                                                        }
+                                                                    }
+                                                                }
                                                             />
                                                         </td>
                                                         <td class="file-path" title=file.path.clone()>
