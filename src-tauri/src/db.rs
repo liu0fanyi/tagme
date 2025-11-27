@@ -13,6 +13,7 @@ pub struct FileListItem {
     pub path: String,
     pub size_bytes: u64,
     pub last_modified: i64,
+    pub is_directory: bool,
 }
 
 // Full file info for files in database (with hash)
@@ -212,24 +213,22 @@ fn hash_file_content(path: &Path) -> Result<String, std::io::Error> {
 pub fn scan_directory_lightweight(root_path: String) -> Result<Vec<FileListItem>, std::io::Error> {
     eprintln!("🔍 Starting lightweight scan for directory: {}", root_path);
     
-    let mut scanned_files = Vec::new();
-    let mut _file_count = 0;
+    let mut scanned_items = Vec::new();
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
-    // Non-recursive scan: only read direct files in the directory
+    // Non-recursive scan: read both files and directories in the directory
     println!("📂 Reading directory entries...");
-    for entry in fs::read_dir(&root_path)?{
+    for entry in fs::read_dir(&root_path)? {
         if let Ok(entry) = entry {
             if let Ok(file_type) = entry.file_type() {
+                let path = entry.path();
+                let path_str = path.to_string_lossy().to_string();
+                
                 if file_type.is_file() {
-                    let path = entry.path();
-                    let path_str = path.to_string_lossy().to_string();
-                    _file_count += 1;
-
-                    // Get file metadata only (no hashing!)
+                    // Regular file
                     if let Ok(metadata) = fs::metadata(&path) {
                         let size_bytes = metadata.len();
                         let last_modified = metadata
@@ -239,10 +238,28 @@ pub fn scan_directory_lightweight(root_path: String) -> Result<Vec<FileListItem>
                             .map(|d| d.as_secs() as i64)
                             .unwrap_or(now);
 
-                        scanned_files.push(FileListItem {
+                        scanned_items.push(FileListItem {
                             path: path_str,
                             size_bytes,
                             last_modified,
+                            is_directory: false,
+                        });
+                    }
+                } else if file_type.is_dir() {
+                    // Directory - include it but don't recurse
+                    if let Ok(metadata) = fs::metadata(&path) {
+                        let last_modified = metadata
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(now);
+
+                        scanned_items.push(FileListItem {
+                            path: path_str,
+                            size_bytes: 0, // Directories have no size
+                            last_modified,
+                            is_directory: true,
                         });
                     }
                 }
@@ -250,8 +267,12 @@ pub fn scan_directory_lightweight(root_path: String) -> Result<Vec<FileListItem>
         }
     }
 
-    eprintln!("✅ Lightweight scan complete! Found {} files", scanned_files.len());
-    Ok(scanned_files)
+    eprintln!("✅ Lightweight scan complete! Found {} items ({} files + {} folders)", 
+        scanned_items.len(),
+        scanned_items.iter().filter(|i| !i.is_directory).count(),
+        scanned_items.iter().filter(|i| i.is_directory).count()
+    );
+    Ok(scanned_items)
 }
 
 // Prune files from DB that no longer exist on disk

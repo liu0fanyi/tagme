@@ -16,6 +16,7 @@ struct FileListItem {
     path: String,
     size_bytes: u64,
     last_modified: i64,
+    is_directory: bool,
 }
 
 // Full file info for files in database (with hash)
@@ -66,6 +67,7 @@ struct DisplayFile {
     last_modified: i64,
     db_id: Option<u32>,
     tags: Vec<TagInfo>,
+    is_directory: bool,
 }
 
 
@@ -222,6 +224,7 @@ pub fn App() -> impl IntoView {
                 last_modified: file.last_modified,
                 db_id: Some(file.id),
                 tags: tags_map.get(&file.id).cloned().unwrap_or_default(),
+                is_directory: false, // DB files are always regular files
             });
         }
 
@@ -233,13 +236,14 @@ pub fn App() -> impl IntoView {
                 let extension = path_obj.extension().unwrap_or_default().to_string_lossy().to_string();
                 
                 display_files.push(DisplayFile {
-                    path: file.path,
+                    path: file.path.clone(),
                     name,
                     extension,
                     size_bytes: file.size_bytes,
                     last_modified: file.last_modified,
                     db_id: None,
                     tags: Vec::new(),
+                    is_directory: file.is_directory,
                 });
             }
         }
@@ -1191,8 +1195,13 @@ fn FileList(
                                                     on:change=move |_| on_toggle(file_path_for_toggle.clone())
                                                 />
                                             </td>
-                                            <td class="file-path" title=file.path.clone()>{file.name.clone()}</td>
-                                            <td>{file.extension.clone()}</td>
+                                            <td class="file-path" title=file.path.clone()>
+                                                {if file.is_directory { "📁 " } else { "" }}
+                                                {file.name.clone()}
+                                            </td>
+                                            <td>
+                                                {if file.is_directory { "Folder".to_string() } else { file.extension.clone() }}
+                                            </td>
                                             <td>{format_file_size(file.size_bytes)}</td>
                                             <td>{format_timestamp(file.last_modified)}</td>
                                             <td class="file-tags">
