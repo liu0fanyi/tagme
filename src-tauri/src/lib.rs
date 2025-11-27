@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use notify::{Watcher, RecursiveMode, Event};
 
 mod db;
+mod ai;
 
 // Global file watcher state
 static WATCHERS: Mutex<Vec<Arc<Mutex<notify::RecommendedWatcher>>>> = Mutex::new(Vec::new());
@@ -384,27 +385,33 @@ pub fn run() {
 fn recommend_tags_by_title(app_handle: tauri::AppHandle, file_path: String, top_k: usize) -> Result<Vec<db::TagInfo>, String> {
     let tags = db::get_all_tags(&app_handle).map_err(|e| e.to_string())?;
     let path = std::path::Path::new(&file_path);
-    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-    if name.is_empty() {
-        return Ok(Vec::new());
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+    let mut tag_names: Vec<String> = Vec::new();
+    for t in &tags { tag_names.push(t.name.clone()); }
+    let ai_scores = ai::recommend_by_title_candle(&name, &tag_names).unwrap_or_default();
+    if !ai_scores.is_empty() {
+        let mut sorted: Vec<(usize, f32)> = Vec::new();
+        for (i, t) in tags.iter().enumerate() {
+            if let Some((_, s)) = ai_scores.iter().find(|(n, _)| n == &t.name) { sorted.push((i, *s)); }
+        }
+        sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut out = Vec::new();
+        for (idx, _) in sorted.into_iter().take(top_k) { out.push(tags[idx].clone()); }
+        return Ok(out);
     }
+    let lname = name.to_lowercase();
+    let tokens: Vec<String> = lname.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
     let mut scored: Vec<(db::TagInfo, i32)> = Vec::new();
     for t in tags {
         let tname = t.name.to_lowercase();
         let mut score = 0;
         if !tname.is_empty() {
-            if name.contains(&tname) { score += 10; }
-            let tokens: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).collect();
-            if tokens.iter().any(|w| *w == tname) { score += 8; }
-            if name.starts_with(&tname) || name.ends_with(&tname) { score += 4; }
+            if lname.contains(&tname) { score += 10; }
+            if tokens.iter().any(|w| w == &tname) { score += 8; }
+            if lname.starts_with(&tname) || lname.ends_with(&tname) { score += 4; }
         }
         if score > 0 { scored.push((t, score)); }
     }
     scored.sort_by(|a, b| b.1.cmp(&a.1));
-    let mut out = Vec::new();
-    for (i, (t, _)) in scored.into_iter().enumerate() {
-        if i >= top_k { break; }
-        out.push(t);
-    }
-    Ok(out)
+    Ok(scored.into_iter().take(top_k).map(|(t, _)| t).collect())
 }
