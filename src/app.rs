@@ -200,6 +200,12 @@ pub fn App() -> impl IntoView {
     let (sort_column, set_sort_column) = signal(SortColumn::Name);
     let (sort_direction, set_sort_direction) = signal(SortDirection::Asc);
 
+    // Panel resizing state
+    let (left_panel_width, set_left_panel_width) = signal(300.0);
+    let (right_panel_width, set_right_panel_width) = signal(300.0);
+    let (is_resizing_left, set_is_resizing_left) = signal(false);
+    let (is_resizing_right, set_is_resizing_right) = signal(false);
+
     // Derived signal for sorted files
     let sorted_files = move || {
         let scanned = scanned_files.get();
@@ -376,6 +382,40 @@ pub fn App() -> impl IntoView {
         
         let _ = window.add_event_listener_with_callback("mouseup", on_mouseup.as_ref().unchecked_ref());
         on_mouseup.forget();
+    });
+
+    // Global mouse handlers for panel resizing
+    Effect::new(move |_| {
+        let window = web_sys::window().unwrap();
+        
+        // Mouse move handler for resizing
+        let on_mousemove = Closure::<dyn FnMut(_)>::new(move |ev: web_sys::MouseEvent| {
+            if is_resizing_left.get_untracked() {
+                let x = ev.client_x() as f64;
+                let new_width = x.max(200.0).min(600.0); // Min 200px, max 600px
+                web_sys::console::log_1(&format!("Resizing left panel to: {}", new_width).into());
+                set_left_panel_width.set(new_width);
+            } else if is_resizing_right.get_untracked() {
+                let window_width = web_sys::window().unwrap().inner_width().unwrap().as_f64().unwrap();
+                let x = ev.client_x() as f64;
+                let new_width = (window_width - x).max(200.0).min(600.0);
+                web_sys::console::log_1(&format!("Resizing right panel to: {}", new_width).into());
+                set_right_panel_width.set(new_width);
+            }
+        });
+        
+        let _ = window.add_event_listener_with_callback("mousemove", on_mousemove.as_ref().unchecked_ref());
+        on_mousemove.forget();
+        
+        // Mouse up handler to stop resizing
+        let on_mouseup_resize = Closure::<dyn FnMut(_)>::new(move |_ev: web_sys::MouseEvent| {
+            web_sys::console::log_1(&"Mouse up - stopping resize".into());
+            set_is_resizing_left.set(false);
+            set_is_resizing_right.set(false);
+        });
+        
+        let _ = window.add_event_listener_with_callback("mouseup", on_mouseup_resize.as_ref().unchecked_ref());
+        on_mouseup_resize.forget();
     });
 
     // Effect to reload tags when trigger changes
@@ -731,7 +771,7 @@ pub fn App() -> impl IntoView {
             </div>
 
             <div class="main-content">
-                <div class="left-panel">
+                <div class="left-panel" style=move || format!("width: {}px", left_panel_width.get())>
                     <div class="panel-header">
                         <h2>"Tags"</h2>
                         <button on:click=move |_| set_show_add_tag_dialog.set(true)>"+"</button>
@@ -750,6 +790,14 @@ pub fn App() -> impl IntoView {
                         set_reload_tags_trigger=set_reload_tags_trigger
                     />
                 </div>
+
+                <div
+                    class="resizer"
+                    on:mousedown=move |_| {
+                        web_sys::console::log_1(&"Left resizer mousedown".into());
+                        set_is_resizing_left.set(true);
+                    }
+                ></div>
 
                 <div class="center-panel">
                     <div class="panel-header">
@@ -771,7 +819,15 @@ pub fn App() -> impl IntoView {
                     />
                 </div>
 
-                <div class="right-sidebar">
+                <div
+                    class="resizer"
+                    on:mousedown=move |_| {
+                        web_sys::console::log_1(&"Right resizer mousedown".into());
+                        set_is_resizing_right.set(true);
+                    }
+                ></div>
+
+                <div class="right-sidebar" style=move || format!("width: {}px", right_panel_width.get())>
                     <div class="panel-header">
                         <h2>"File Tags"</h2>
                     </div>
