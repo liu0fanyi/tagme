@@ -189,8 +189,46 @@ pub fn App() -> impl IntoView {
     let (use_and_logic, set_use_and_logic) = signal(true);
     let (displayed_files, set_displayed_files) = signal(Vec::<FileInfo>::new());
     let (file_tags_map, set_file_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
+    let (file_tags_map, set_file_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
     let (selected_file_paths, set_selected_file_paths) = signal(Vec::<String>::new());
     let (last_selected_file_path, set_last_selected_file_path) = signal(None::<String>);
+    let (file_recommended_tags_map, set_file_recommended_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
+    let (show_recommended, set_show_recommended) = signal(false);
+    let compute_title_recommendations = move |_| {
+        web_sys::console::log_1(&"[Recommend] computing title-based tags".into());
+        let files = displayed_files.get();
+        let tags = all_tags.get();
+        let mut map = std::collections::HashMap::new();
+        let mut total_buttons = 0usize;
+        for f in &files {
+            let path_obj = std::path::Path::new(&f.path);
+            let name = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+            if name.is_empty() { continue; }
+            let tokens: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).collect();
+            let mut scored: Vec<(TagInfo, i32)> = Vec::new();
+            for t in &tags {
+                let tname = t.name.to_lowercase();
+                let mut score = 0;
+                if !tname.is_empty() {
+                    if name.contains(&tname) { score += 10; }
+                    if tokens.iter().any(|w| *w == tname) { score += 8; }
+                    if name.starts_with(&tname) || name.ends_with(&tname) { score += 4; }
+                }
+                if score > 0 { scored.push((t.clone(), score)); }
+            }
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            let mut out: Vec<TagInfo> = Vec::new();
+            for (i, (t, _)) in scored.into_iter().enumerate() {
+                if i >= 3 { break; }
+                out.push(t);
+            }
+            total_buttons += out.len();
+            map.insert(f.id, out);
+        }
+        set_file_recommended_tags_map.set(map);
+        set_show_recommended.set(true);
+        web_sys::console::log_1(&format!("[Recommend] ready with {} buttons", total_buttons).into());
+    };
     let (scanning, set_scanning) = signal(false);
     let (show_add_tag_dialog, set_show_add_tag_dialog) = signal(false);
     let (new_tag_name, set_new_tag_name) = signal(String::new());
@@ -887,12 +925,20 @@ pub fn App() -> impl IntoView {
                 <div class="center-panel">
                     <div class="panel-header">
                         <h2>"Files"</h2>
-                        <div class="file-controls">
+                        <div class="file-controls" style="display:flex; gap:8px; align-items:center;">
                             <button on:click=show_all>"Show All"</button>
                             <button on:click=toggle_and_or>
                                 {move || if use_and_logic.get() { "Filter: AND" } else { "Filter: OR" }}
                             </button>
-                            
+                            <button on:click=compute_title_recommendations>"Recommend (Title)"</button>
+                            <button on:click=move |_| {
+                                set_show_recommended.set(false);
+                                set_file_recommended_tags_map.set(std::collections::HashMap::new());
+                                web_sys::console::log_1(&"[Recommend] cleared".into());
+                            }>
+                                "Hide"
+                            </button>
+                        
                         </div>
                     </div>
                     <GroupedFileList
@@ -907,6 +953,8 @@ pub fn App() -> impl IntoView {
                         set_selected_file_paths=set_selected_file_paths
                         last_selected_file_path=last_selected_file_path
                         set_last_selected_file_path=set_last_selected_file_path
+                        recommended_map=file_recommended_tags_map
+                        show_recommended=show_recommended
                     />
                 </div>
 
@@ -1433,6 +1481,8 @@ fn GroupedFileList(
     set_selected_file_paths: WriteSignal<Vec<String>>,
     last_selected_file_path: ReadSignal<Option<String>>,
     set_last_selected_file_path: WriteSignal<Option<String>>,
+    recommended_map: ReadSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
+    show_recommended: ReadSignal<bool>,
 ) -> impl IntoView {
     fn is_under_root(file_path: &str, root: &str) -> bool {
         let mut r = root.replace('/', "\\").to_lowercase();
@@ -1516,6 +1566,7 @@ fn GroupedFileList(
                                                                 children=move |file| {
                                                                     let file_path = file.path.clone();
                                                                     let file_path_for_toggle = file_path.clone();
+                                                                    let file_path_arc = std::sync::Arc::new(file_path_for_toggle.clone());
                                                                     let file_path_for_class = file_path.clone();
                                                                     let file_path_for_checked = file_path.clone();
                                                                     let file_path_for_dblclick = file_path.clone();
@@ -1597,6 +1648,38 @@ fn GroupedFileList(
                                                                                         }
                                                                                     }
                                                                                 </Show>
+                                                                                <Show when=move || show_recommended.get() fallback=|| view!{}>
+                                                                                {
+                                                                                    let fp_arc_for_recs = file_path_arc.clone();
+                                                                                    view! {
+                                                                                        <div style="margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
+                                                                                            <For
+                                                                                                each=move || {
+                                                                                                    if let Some(id) = file.db_id {
+                                                                                                        recommended_map.get().get(&id).cloned().unwrap_or_default()
+                                                                                                    } else { Vec::new() }
+                                                                                                }
+                                                                                                key=|t| t.id
+                                                                                                children=move |t| {
+                                                                                                    let tid = t.id;
+                                                                                                    let fp_arc_local = fp_arc_for_recs.clone();
+                                                                                                    view! {
+                                                                                                        <button style="background:#eee; color:#555; border:none; border-radius:10px; padding:2px 6px; cursor:pointer;"
+                                                                                                            on:click=move |_| {
+                                                                                                                let fp = (*fp_arc_local).clone();
+                                                                                                                let args = AddFileTagArgs { file_path: fp, tag_id: tid };
+                                                                                                                spawn_local(async move {
+                                                                                                                    let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                                                                                });
+                                                                                                            }
+                                                                                                        >{t.name.clone()}</button>
+                                                                                                    }
+                                                                                                }
+                                                                                            />
+                                                                                        </div>
+                                                                                    }
+                                                                                }
+                                                                                </Show>
                                                                             </td>
                                                                         </tr>
                                                                     }
@@ -1645,6 +1728,7 @@ fn GroupedFileList(
                                             children=move |file| {
                                                 let file_path = file.path.clone();
                                                 let file_path_for_toggle = file_path.clone();
+                                                let file_path_arc2 = std::sync::Arc::new(file_path_for_toggle.clone());
                                                 let file_path_for_class = file_path.clone();
                                                 let file_path_for_checked = file_path.clone();
                                                 let file_path_for_dblclick = file_path.clone();
@@ -1725,6 +1809,38 @@ fn GroupedFileList(
                                                                         />
                                                                     }
                                                                 }
+                                                            </Show>
+                                                            <Show when=move || show_recommended.get() fallback=|| view!{}>
+                                                            {
+                                                                let fp_arc_for_recs = file_path_arc2.clone();
+                                                                view! {
+                                                                    <div style="margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
+                                                                        <For
+                                                                            each=move || {
+                                                                                if let Some(id) = file.db_id {
+                                                                                    recommended_map.get().get(&id).cloned().unwrap_or_default()
+                                                                                } else { Vec::new() }
+                                                                            }
+                                                                            key=|t| t.id
+                                                                            children=move |t| {
+                                                                                let tid = t.id;
+                                                                                let fp_arc_local = fp_arc_for_recs.clone();
+                                                                                view! {
+                                                                                    <button style="background:#eee; color:#555; border:none; border-radius:10px; padding:2px 6px; cursor:pointer;"
+                                                                                        on:click=move |_| {
+                                                                                            let fp = (*fp_arc_local).clone();
+                                                                                            let args = AddFileTagArgs { file_path: fp, tag_id: tid };
+                                                                                            spawn_local(async move {
+                                                                                                let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                                                            });
+                                                                                        }
+                                                                                    >{t.name.clone()}</button>
+                                                                                }
+                                                                            }
+                                                                        />
+                                                                    </div>
+                                                                }
+                                                            }
                                                             </Show>
                                                         </td>
                                                     </tr>

@@ -372,10 +372,39 @@ pub fn run() {
             remove_file_tag,
             get_file_tags,
             filter_files_by_tags,
+            recommend_tags_by_title,
             save_window_state,
             load_window_state,
             open_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+#[tauri::command]
+fn recommend_tags_by_title(app_handle: tauri::AppHandle, file_path: String, top_k: usize) -> Result<Vec<db::TagInfo>, String> {
+    let tags = db::get_all_tags(&app_handle).map_err(|e| e.to_string())?;
+    let path = std::path::Path::new(&file_path);
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    if name.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut scored: Vec<(db::TagInfo, i32)> = Vec::new();
+    for t in tags {
+        let tname = t.name.to_lowercase();
+        let mut score = 0;
+        if !tname.is_empty() {
+            if name.contains(&tname) { score += 10; }
+            let tokens: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).collect();
+            if tokens.iter().any(|w| *w == tname) { score += 8; }
+            if name.starts_with(&tname) || name.ends_with(&tname) { score += 4; }
+        }
+        if score > 0 { scored.push((t, score)); }
+    }
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out = Vec::new();
+    for (i, (t, _)) in scored.into_iter().enumerate() {
+        if i >= top_k { break; }
+        out.push(t);
+    }
+    Ok(out)
 }
