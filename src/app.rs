@@ -649,15 +649,39 @@ pub fn App() -> impl IntoView {
 
     let toggle_tag_selection = move |tag_id: u32| {
         let mut current = selected_tag_ids.get();
-        if let Some(pos) = current.iter().position(|&id| id == tag_id) {
-            current.remove(pos);
-        } else {
-            current.push(tag_id);
+        web_sys::console::log_1(&format!("toggle_tag_selection start, tag_id={}, before={:?}", tag_id, current).into());
+        let tags = all_tags.get();
+        let mut stack = vec![tag_id];
+        let mut subtree_ids: Vec<u32> = Vec::new();
+        while let Some(id) = stack.pop() {
+            subtree_ids.push(id);
+            for t in tags.iter().filter(|t| t.parent_id == Some(id)) {
+                stack.push(t.id);
+            }
         }
+        let should_select = !current.iter().any(|&id| id == tag_id);
+        web_sys::console::log_1(&format!("should_select={}, subtree_ids={:?}", should_select, subtree_ids).into());
+        if should_select {
+            for id in &subtree_ids {
+                if !current.contains(id) {
+                    current.push(*id);
+                }
+            }
+        } else {
+            let remove_set: std::collections::HashSet<u32> = subtree_ids.iter().copied().collect();
+            current.retain(|id| !remove_set.contains(id));
+        }
+        web_sys::console::log_1(&format!("toggle_tag_selection end, after={:?}", current).into());
         set_selected_tag_ids.set(current.clone());
-        
-        // Filter files
-        filter_files(current, use_and_logic.get(), set_displayed_files, all_files.get());
+        let force_or = should_select && subtree_ids.len() > 1;
+        let logic = if force_or {
+            set_use_and_logic.set(false);
+            false
+        } else {
+            use_and_logic.get()
+        };
+        web_sys::console::log_1(&format!("filter_files with {} tags, use_and={}, force_or={}", current.len(), logic, force_or).into());
+        filter_files(current, logic, set_displayed_files, all_files.get());
     };
 
     let toggle_and_or = move |_| {
@@ -1126,10 +1150,17 @@ fn TagNode(
 
     // Mouse down - start drag
     let on_mousedown = move |ev: web_sys::MouseEvent| {
-        if ev.button() == 0 { // Left click only
+        if ev.button() == 0 {
+            if let Some(target) = ev.target() {
+                if target.dyn_ref::<web_sys::HtmlInputElement>().is_some() {
+                    return;
+                }
+                if target.dyn_ref::<web_sys::HtmlButtonElement>().is_some() {
+                    return;
+                }
+            }
             set_dragging_tag_id.set(Some(tag_id));
             web_sys::console::log_1(&format!("🟢 Start dragging tag: {}", tag_id).into());
-            ev.prevent_default();
             ev.stop_propagation();
         }
     };
@@ -1203,7 +1234,7 @@ fn TagNode(
             >
                 <input
                     type="checkbox"
-                    checked=is_selected
+                    prop:checked=is_selected
                     on:change=move |_| on_toggle(tag_id)
                 />
                 <span class="tag-name" style=move || tag.color.clone().map(|c| format!("color: {}", c)).unwrap_or_default()>
@@ -1710,6 +1741,7 @@ fn filter_files(
     }
 
     spawn_local(async move {
+        web_sys::console::log_1(&format!("filter_files start, tag_ids={:?}, use_and={}", tag_ids, use_and).into());
         let args = FilterFilesByTagsArgs {
             tag_ids,
             use_and_logic: use_and,
@@ -1717,6 +1749,7 @@ fn filter_files(
         let result_val = invoke("filter_files_by_tags", serde_wasm_bindgen::to_value(&args).unwrap()).await;
         
         if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileInfo>>(result_val) {
+            web_sys::console::log_1(&format!("filter_files result count={}", files.len()).into());
             set_displayed_files.set(files);
         }
     });
