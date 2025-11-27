@@ -1333,6 +1333,12 @@ fn GroupedFileList(
     sort_direction: ReadSignal<SortDirection>,
     on_sort: impl Fn(SortColumn) + 'static + Copy + Send,
 ) -> impl IntoView {
+    fn is_under_root(file_path: &str, root: &str) -> bool {
+        let mut r = root.replace('/', "\\").to_lowercase();
+        if !r.ends_with('\\') { r.push('\\'); }
+        let f = file_path.replace('/', "\\").to_lowercase();
+        f.starts_with(&r) || f == root.replace('/', "\\").to_lowercase()
+    }
     let sort_indicator = move |col: SortColumn| {
         if sort_column.get() == col {
             match sort_direction.get() {
@@ -1351,7 +1357,11 @@ fn GroupedFileList(
                     let roots_vec = roots.get();
                     let all = files();
                     roots_vec.into_iter().map(|r| {
-                        let v = all.iter().cloned().filter(|f| f.path.starts_with(&r)).collect::<Vec<_>>();
+                        let v = all
+                            .iter()
+                            .cloned()
+                            .filter(|f| is_under_root(&f.path, &r))
+                            .collect::<Vec<_>>();
                         (r, v)
                     }).collect::<Vec<_>>()
                 }
@@ -1359,6 +1369,7 @@ fn GroupedFileList(
                 children=move |grp: (String, Vec<DisplayFile>)| {
                     let r = grp.0.clone();
                     let group_files = grp.1.clone();
+                    let group_files_for_empty = group_files.clone();
                     view! {
                         <div class="file-group">
                             <div class="group-header">{r.clone()}</div>
@@ -1447,6 +1458,7 @@ fn GroupedFileList(
                                             }
                                         }
                                     />
+                                    {move || if group_files_for_empty.is_empty() { Some(view! { <tr><td colspan="6"><em>"No files in this root"</em></td></tr> }) } else { None }}
                                 </tbody>
                             </table>
                         </div>
