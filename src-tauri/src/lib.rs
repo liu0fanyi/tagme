@@ -7,7 +7,7 @@ use notify::{Watcher, RecursiveMode, Event};
 mod db;
 
 // Global file watcher state
-static WATCHER: Mutex<Option<Arc<Mutex<notify::RecommendedWatcher>>>> = Mutex::new(None);
+static WATCHERS: Mutex<Vec<Arc<Mutex<notify::RecommendedWatcher>>>> = Mutex::new(Vec::new());
 
 // Window management commands
 #[tauri::command]
@@ -52,7 +52,7 @@ async fn select_root_directory(app_handle: tauri::AppHandle) -> Result<String, S
     if let Some(file_path) = dialog.blocking_pick_folder() {
         if let Some(path) = file_path.as_path() {
             if let Some(path_str) = path.to_str() {
-                db::set_root_directory(&app_handle, path_str.to_string())
+                db::add_root_directory(&app_handle, path_str.to_string())
                     .map_err(|e| e.to_string())?;
                 return Ok(path_str.to_string());
             }
@@ -66,6 +66,16 @@ async fn select_root_directory(app_handle: tauri::AppHandle) -> Result<String, S
 #[tauri::command]
 fn get_root_directory(app_handle: tauri::AppHandle) -> Option<String> {
     db::get_root_directory(&app_handle).ok().flatten()
+}
+
+#[tauri::command]
+fn get_root_directories(app_handle: tauri::AppHandle) -> Result<Vec<String>, String> {
+    db::get_root_directories(&app_handle).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_root_directory(app_handle: tauri::AppHandle, path: String) -> Result<(), String> {
+    db::remove_root_directory(&app_handle, path).map_err(|e| e.to_string())
 }
 
 // File scanning commands
@@ -89,15 +99,25 @@ fn scan_files(app_handle: tauri::AppHandle, root_path: String) -> Result<Vec<db:
     result
 }
 
+#[tauri::command]
+fn scan_files_multi(app_handle: tauri::AppHandle, root_paths: Vec<String>) -> Result<Vec<db::FileListItem>, String> {
+    eprintln!("🎯 [TAURI] scan_files_multi command called with paths: {:?}", root_paths);
+    if let Err(e) = db::prune_missing_files(&app_handle) {
+        eprintln!("⚠️ [TAURI] Warning: Failed to prune missing files: {}", e);
+    }
+    let result = db::scan_directories_lightweight(root_paths).map_err(|e| e.to_string());
+    if result.is_ok() {
+        eprintln!("✅ [TAURI] scan_files_multi completed successfully");
+    }
+    result
+}
+
 // File watching commands
 #[tauri::command]
 fn start_watching(app_handle: tauri::AppHandle, root_path: String) -> Result<(), String> {
     use notify::EventKind;
     
     eprintln!("🔍 [TAURI] start_watching called for: {}", root_path);
-    
-    // Stop any existing watcher first
-    let _ = stop_watching();
     
     let path = std::path::PathBuf::from(root_path.clone());
     let app = app_handle.clone();
@@ -130,8 +150,7 @@ fn start_watching(app_handle: tauri::AppHandle, root_path: String) -> Result<(),
     watcher_arc.lock().unwrap().watch(&path, RecursiveMode::NonRecursive)
         .map_err(|e| e.to_string())?;
     
-    // Store watcher globally
-    *WATCHER.lock().unwrap() = Some(watcher_arc);
+    WATCHERS.lock().unwrap().push(watcher_arc);
     
     eprintln!("✅ [TAURI] File watching started for: {}", root_path);
     eprintln!("📊 [TAURI] Watching mode: NonRecursive");
@@ -142,10 +161,18 @@ fn start_watching(app_handle: tauri::AppHandle, root_path: String) -> Result<(),
 fn stop_watching() -> Result<(), String> {
     eprintln!("🛑 [TAURI] stop_watching called");
     
-    let mut watcher_guard = WATCHER.lock().unwrap();
-    *watcher_guard = None;
+    let mut list = WATCHERS.lock().unwrap();
+    list.clear();
     
     eprintln!("✅ [TAURI] File watching stopped");
+    Ok(())
+}
+
+#[tauri::command]
+fn start_watching_multi(app_handle: tauri::AppHandle, root_paths: Vec<String>) -> Result<(), String> {
+    for p in root_paths {
+        let _ = start_watching(app_handle.clone(), p);
+    }
     Ok(())
 }
 
@@ -328,8 +355,12 @@ pub fn run() {
             toggle_maximize,
             select_root_directory,
             get_root_directory,
+            get_root_directories,
+            remove_root_directory,
             scan_files,
+            scan_files_multi,
             start_watching,
+            start_watching_multi,
             stop_watching,
             get_all_files,
             create_tag,

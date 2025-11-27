@@ -181,7 +181,7 @@ fn format_timestamp(ts: i64) -> String {
 
 #[component]
 pub fn App() -> impl IntoView {
-    let (root_directory, set_root_directory) = signal(None::<String>);
+    let (root_directories, set_root_directories) = signal(Vec::<String>::new());
     let (scanned_files, set_scanned_files) = signal(Vec::<FileListItem>::new());
     let (all_files, set_all_files) = signal(Vec::<FileInfo>::new());
     let (all_tags, set_all_tags) = signal(Vec::<TagInfo>::new());
@@ -431,12 +431,18 @@ pub fn App() -> impl IntoView {
     // Load initial state
     Effect::new(move || {
         spawn_local(async move {
-            // Load root directory
-            let root: Option<String> = serde_wasm_bindgen::from_value(
-                invoke("get_root_directory", JsValue::NULL).await
-            ).unwrap_or(None);
-            let _root = root.clone();
-            set_root_directory.set(_root );
+            let roots: Result<Vec<String>, _> = serde_wasm_bindgen::from_value(
+                invoke("get_root_directories", JsValue::NULL).await
+            );
+            match roots {
+                Ok(list) => set_root_directories.set(list),
+                Err(_) => {
+                    let root: Option<String> = serde_wasm_bindgen::from_value(
+                        invoke("get_root_directory", JsValue::NULL).await
+                    ).unwrap_or(None);
+                    if let Some(p) = root { set_root_directories.set(vec![p]); }
+                }
+            }
 
             // Load tags
             load_tags(set_all_tags).await;
@@ -448,38 +454,28 @@ pub fn App() -> impl IntoView {
             let state_value = invoke("load_window_state", JsValue::NULL).await;
             let _ = state_value; // Unused for now
             
-            // Start watching if root directory exists
-            if let Some(watch_path) = root.clone() {
-                web_sys::console::log_1(&format!("🔍 [FRONTEND] Auto-starting watcher for saved directory: {}", watch_path).into());
+            let list = root_directories.get_untracked();
+            if !list.is_empty() {
                 spawn_local(async move {
                     #[derive(Serialize)]
                     #[serde(rename_all = "camelCase")]
-                    struct StartWatchingArgs {
-                        root_path: String,
-                    }
-                    
-                    let watch_args = StartWatchingArgs {
-                        root_path: watch_path.clone(),
-                    };
-                    web_sys::console::log_1(&format!("📡 [FRONTEND] Invoking start_watching for: {}", watch_path).into());
-                    let result = invoke("start_watching", serde_wasm_bindgen::to_value(&watch_args).unwrap()).await;
-                    web_sys::console::log_1(&format!("✅ [FRONTEND] Auto-start watcher result: {:?}", result).into());
+                    struct StartWatchingMultiArgs { root_paths: Vec<String> }
+                    let args = StartWatchingMultiArgs { root_paths: list.clone() };
+                    let _ = invoke("start_watching_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await;
                 });
-            } else {
-                web_sys::console::log_1(&"⚠️ [FRONTEND] No saved directory, skipping auto-start watcher".into());
             }
 
-            // Perform initial lightweight scan if root directory exists
-            if let Some(scan_path) = root.clone() {
-                web_sys::console::log_1(&format!("🔍 [FRONTEND] Performing initial scan for: {}", scan_path).into());
+            let list2 = root_directories.get_untracked();
+            if !list2.is_empty() {
                 spawn_local(async move {
-                    let args = ScanFilesArgs { root_path: scan_path };
+                    #[derive(Serialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct ScanFilesMultiArgs { root_paths: Vec<String> }
+                    let args = ScanFilesMultiArgs { root_paths: list2.clone() };
                     if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
-                        invoke("scan_files", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                        invoke("scan_files_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await
                     ) {
-                        web_sys::console::log_1(&format!("✅ [FRONTEND] Initial scan complete, {} files found", files.len()).into());
                         set_scanned_files.set(files);
-                        // Refresh DB files as well to ensure consistency
                         load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
                     }
                 });
@@ -509,23 +505,22 @@ pub fn App() -> impl IntoView {
         web_sys::console::log_1(&"🎧 [FRONTEND] Registering custom event listener for 'tauri-fs-change'".into());
         let closure = Closure::wrap(Box::new(move |_: web_sys::Event| {
             web_sys::console::log_1(&"📥 [FRONTEND] Custom event received, refreshing file list...".into());
-            if let Some(path) = root_directory.get_untracked() {
-                web_sys::console::log_1(&format!("📂 [FRONTEND] Scanning path: {}", path).into());
+            let list = root_directories.get_untracked();
+            if !list.is_empty() {
                 set_scanning.set(true);
                 spawn_local(async move {
-                    let args = ScanFilesArgs { root_path: path };
+                    #[derive(Serialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct ScanFilesMultiArgs { root_paths: Vec<String> }
+                    let args = ScanFilesMultiArgs { root_paths: list.clone() };
                     if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
-                        invoke("scan_files", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                        invoke("scan_files_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await
                     ) {
-                        web_sys::console::log_1(&format!("✅ [FRONTEND] Scan complete, {} files found", files.len()).into());
                         set_scanned_files.set(files);
-                        // Refresh DB files as well (to reflect pruned files)
                         load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
                     }
                     set_scanning.set(false);
                 });
-            } else {
-                web_sys::console::warn_1(&"⚠️ [FRONTEND] No root directory set, cannot scan".into());
             }
         }) as Box<dyn FnMut(_)>);
         
@@ -539,16 +534,20 @@ pub fn App() -> impl IntoView {
             let path_val = invoke("select_root_directory", JsValue::NULL).await;
             
             if let Ok(path) = serde_wasm_bindgen::from_value::<String>(path_val) {
-                set_root_directory.set(Some(path.clone()));
+                let mut list = root_directories.get_untracked();
+                if !list.iter().any(|p| p == &path) { list.push(path.clone()); }
+                set_root_directories.set(list.clone());
                 
                 // Automatically trigger scan after selecting directory
                 set_scanning.set(true);
-                web_sys::console::log_1(&"Auto-scanning after selection...".into());
-                let args = ScanFilesArgs { root_path: path };
+                #[derive(Serialize)]
+                #[serde(rename_all = "camelCase")]
+                struct ScanFilesMultiArgs { root_paths: Vec<String> }
+                let args = ScanFilesMultiArgs { root_paths: root_directories.get_untracked() };
                 
                 // Tauri unwraps Result automatically, so expect Vec<FileListItem> directly
                 let scan_result = match serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
-                    invoke("scan_files", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                    invoke("scan_files_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await
                 ) {
                     Ok(files) => {
                         web_sys::console::log_1(&format!("Auto-scan success: {} files", files.len()).into());
@@ -567,38 +566,31 @@ pub fn App() -> impl IntoView {
                     load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
                 }
                 
-                // Start watching the directory for file changes
-                let watch_path = root_directory.get_untracked().unwrap_or_default();
-                web_sys::console::log_1(&format!("🔍 [FRONTEND] Starting watcher for: {}", watch_path).into());
+                web_sys::console::log_1(&"🔍 [FRONTEND] Starting watcher for multiple roots".into());
                 spawn_local(async move {
                     #[derive(Serialize)]
                     #[serde(rename_all = "camelCase")]
-                    struct StartWatchingArgs {
-                        root_path: String,
-                    }
-                    
-                    let watch_args = StartWatchingArgs {
-                        root_path: watch_path.clone(),
-                    };
-                    web_sys::console::log_1(&format!("📡 [FRONTEND] Invoking start_watching for: {}", watch_path).into());
-                    let result = invoke("start_watching", serde_wasm_bindgen::to_value(&watch_args).unwrap()).await;
-                    web_sys::console::log_1(&format!("✅ [FRONTEND] start_watching result: {:?}", result).into());
+                    struct StartWatchingMultiArgs { root_paths: Vec<String> }
+                    let args = StartWatchingMultiArgs { root_paths: root_directories.get_untracked() };
+                    let _ = invoke("start_watching_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await;
                 });
             }
         });
     };
 
     let scan_directory = move |_| {
-        let root = root_directory.get();
-        if let Some(path) = root {
+        let list = root_directories.get();
+        if !list.is_empty() {
             set_scanning.set(true);
             spawn_local(async move {
-                web_sys::console::log_1(&"Invoking scan_files...".into());
-                let args = ScanFilesArgs { root_path: path };
+                #[derive(Serialize)]
+                #[serde(rename_all = "camelCase")]
+                struct ScanFilesMultiArgs { root_paths: Vec<String> }
+                let args = ScanFilesMultiArgs { root_paths: list.clone() };
                 
                 // Tauri unwraps Result automatically, so expect Vec<FileListItem> directly
                 let result = match serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
-                    invoke("scan_files", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                    invoke("scan_files_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await
                 ) {
                     Ok(files) => {
                         web_sys::console::log_1(&format!("Scan success: {} files", files.len()).into());
@@ -762,10 +754,47 @@ pub fn App() -> impl IntoView {
 
             <div class="toolbar">
                 <button on:click=select_directory>"Select Root Directory"</button>
-                {move || root_directory.get().map(|path| view! {
-                    <span class="root-path">{path}</span>
-                })}
-                <button on:click=scan_directory disabled=move || root_directory.get().is_none()>
+                {move || {
+                    let list = root_directories.get();
+                    if list.is_empty() { None } else {
+                        Some(view! {
+                            <div class="root-paths" style="display:flex; gap:6px; align-items:center;">
+                                <For
+                                    each=move || list.clone()
+                                    key=|p| p.clone()
+                                    children=move |p| {
+                                        let rp = p.clone();
+                                        let rp_display = rp.clone();
+                                        let remove = move |_| {
+                                            let rp2 = rp.clone();
+                                            spawn_local(async move {
+                                                #[derive(Serialize)]
+                                                #[serde(rename_all = "camelCase")]
+                                                struct RemoveRootArgs { path: String }
+                                                let _ = invoke("remove_root_directory", serde_wasm_bindgen::to_value(&RemoveRootArgs { path: rp2.clone() }).unwrap()).await;
+                                            });
+                                            set_root_directories.update(|v| v.retain(|x| x != &rp));
+                                            let updated = root_directories.get_untracked();
+                                            spawn_local(async move {
+                                                #[derive(Serialize)]
+                                                #[serde(rename_all = "camelCase")]
+                                                struct StartWatchingMultiArgs { root_paths: Vec<String> }
+                                                let _ = invoke("start_watching_multi", serde_wasm_bindgen::to_value(&StartWatchingMultiArgs { root_paths: updated.clone() }).unwrap()).await;
+                                            });
+                                        };
+                                        view! {
+                                            <span class="root-path" style="padding:2px 6px; border:1px solid #ccc; border-radius:4px; display:inline-flex; align-items:center; gap:6px;">
+                                                {rp_display.clone()}
+                                                <button on:click=remove title="Remove" style="border:none; background:transparent; cursor:pointer; color:#c00;">"×"</button>
+                                            </span>
+                                        }
+                                    }
+                                />
+                            </div>
+                        })
+                    }
+                }}
+                <button on:click=scan_directory disabled=move || root_directories.get().is_empty()>
                     {move || if scanning.get() { "Scanning..." } else { "Scan Files" }}
                 </button>
             </div>

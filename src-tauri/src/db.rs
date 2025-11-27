@@ -199,6 +199,45 @@ pub fn get_root_directory(app_handle: &AppHandle) -> Result<Option<String>> {
     }
 }
 
+pub fn set_root_directories(app_handle: &AppHandle, paths: Vec<String>) -> Result<()> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let value = serde_json::to_string(&paths).unwrap_or("[]".to_string());
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('root_directories', ?1)",
+        params![value],
+    )?;
+    Ok(())
+}
+
+pub fn get_root_directories(app_handle: &AppHandle) -> Result<Vec<String>> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let result: Result<String, _> = conn.query_row(
+        "SELECT value FROM settings WHERE key = 'root_directories'",
+        [],
+        |row| row.get(0),
+    );
+    match result {
+        Ok(json) => serde_json::from_str::<Vec<String>>(&json)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn add_root_directory(app_handle: &AppHandle, path: String) -> Result<()> {
+    let mut list = get_root_directories(app_handle)?;
+    if !list.iter().any(|p| p == &path) {
+        list.push(path);
+    }
+    set_root_directories(app_handle, list)
+}
+
+pub fn remove_root_directory(app_handle: &AppHandle, path: String) -> Result<()> {
+    let mut list = get_root_directories(app_handle)?;
+    list.retain(|p| p != &path);
+    set_root_directories(app_handle, list)
+}
+
 // File hashing function
 fn hash_file_content(path: &Path) -> Result<String, std::io::Error> {
     let file = fs::File::open(path)?;
@@ -273,6 +312,15 @@ pub fn scan_directory_lightweight(root_path: String) -> Result<Vec<FileListItem>
         scanned_items.iter().filter(|i| i.is_directory).count()
     );
     Ok(scanned_items)
+}
+
+pub fn scan_directories_lightweight(root_paths: Vec<String>) -> Result<Vec<FileListItem>, std::io::Error> {
+    let mut all = Vec::new();
+    for root in root_paths {
+        let mut items = scan_directory_lightweight(root)?;
+        all.append(&mut items);
+    }
+    Ok(all)
 }
 
 // Prune files from DB that no longer exist on disk
