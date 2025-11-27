@@ -1188,7 +1188,7 @@ fn FileList(
                                                 });
                                             }
                                         >
-                                            <td>
+                                            <td on:dblclick=|e| e.stop_propagation()>
                                                 <input
                                                     type="checkbox"
                                                     checked=move || selected_file_paths.get().contains(&file_path_for_checked)
