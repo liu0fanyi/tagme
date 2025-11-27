@@ -199,6 +199,7 @@ pub fn App() -> impl IntoView {
     // Sorting state
     let (sort_column, set_sort_column) = signal(SortColumn::Name);
     let (sort_direction, set_sort_direction) = signal(SortDirection::Asc);
+    let (active_root_filter, set_active_root_filter) = signal(None::<String>);
 
     // Panel resizing state
     let (left_panel_width, set_left_panel_width) = signal(300.0);
@@ -435,7 +436,16 @@ pub fn App() -> impl IntoView {
                 invoke("get_root_directories", JsValue::NULL).await
             );
             match roots {
-                Ok(list) => set_root_directories.set(list),
+                Ok(list) => {
+                    if list.is_empty() {
+                        let root: Option<String> = serde_wasm_bindgen::from_value(
+                            invoke("get_root_directory", JsValue::NULL).await
+                        ).unwrap_or(None);
+                        if let Some(p) = root { set_root_directories.set(vec![p]); }
+                    } else {
+                        set_root_directories.set(list);
+                    }
+                },
                 Err(_) => {
                     let root: Option<String> = serde_wasm_bindgen::from_value(
                         invoke("get_root_directory", JsValue::NULL).await
@@ -765,15 +775,17 @@ pub fn App() -> impl IntoView {
                                     children=move |p| {
                                         let rp = p.clone();
                                         let rp_display = rp.clone();
-                                        let remove = move |_| {
-                                            let rp2 = rp.clone();
+                                        let remove_val = rp.clone();
+                                        let remove = move |ev: web_sys::MouseEvent| {
+                                            ev.stop_propagation();
+                                            let rp2 = remove_val.clone();
                                             spawn_local(async move {
                                                 #[derive(Serialize)]
                                                 #[serde(rename_all = "camelCase")]
                                                 struct RemoveRootArgs { path: String }
                                                 let _ = invoke("remove_root_directory", serde_wasm_bindgen::to_value(&RemoveRootArgs { path: rp2.clone() }).unwrap()).await;
                                             });
-                                            set_root_directories.update(|v| v.retain(|x| x != &rp));
+                                            set_root_directories.update(|v| v.retain(|x| x != &remove_val));
                                             let updated = root_directories.get_untracked();
                                             spawn_local(async move {
                                                 #[derive(Serialize)]
@@ -782,8 +794,24 @@ pub fn App() -> impl IntoView {
                                                 let _ = invoke("start_watching_multi", serde_wasm_bindgen::to_value(&StartWatchingMultiArgs { root_paths: updated.clone() }).unwrap()).await;
                                             });
                                         };
+                                        let rp_filter_src = rp.clone();
+                                        let rp_filter = rp_filter_src.clone();
+                                        let is_active = move || active_root_filter.get().as_ref().map(|x| x == &rp_filter).unwrap_or(false);
+                                        let toggle_val = rp_filter_src.clone();
+                                        let toggle_filter = move |_| {
+                                            let current = active_root_filter.get_untracked();
+                                            if current.as_ref() == Some(&toggle_val) {
+                                                set_active_root_filter.set(None);
+                                            } else {
+                                                set_active_root_filter.set(Some(toggle_val.clone()));
+                                            }
+                                        };
                                         view! {
-                                            <span class="root-path" style="padding:2px 6px; border:1px solid #ccc; border-radius:4px; display:inline-flex; align-items:center; gap:6px;">
+                                            <span
+                                                class=move || if is_active() { "root-path active" } else { "root-path" }
+                                                style="padding:2px 6px; border:1px solid #ccc; border-radius:4px; display:inline-flex; align-items:center; gap:6px; cursor:pointer;"
+                                                on:click=toggle_filter
+                                            >
                                                 {rp_display.clone()}
                                                 <button on:click=remove title="Remove" style="border:none; background:transparent; cursor:pointer; color:#c00;">"×"</button>
                                             </span>
@@ -836,11 +864,13 @@ pub fn App() -> impl IntoView {
                             <button on:click=toggle_and_or>
                                 {move || if use_and_logic.get() { "Filter: AND" } else { "Filter: OR" }}
                             </button>
+                            
                         </div>
                     </div>
                     <GroupedFileList
                         files=sorted_files
                         roots=root_directories
+                        active_root_filter=active_root_filter
                         selected_file_paths=selected_file_paths
                         on_toggle=toggle_file_selection
                         sort_column=sort_column
@@ -1327,11 +1357,12 @@ fn FileList(
 fn GroupedFileList(
     files: impl Fn() -> Vec<DisplayFile> + 'static + Send,
     roots: ReadSignal<Vec<String>>,
+    active_root_filter: ReadSignal<Option<String>>,
     selected_file_paths: ReadSignal<Vec<String>>,
-    on_toggle: impl Fn(String) + 'static + Copy + Send,
+    on_toggle: impl Fn(String) + 'static + Copy + Send + Sync,
     sort_column: ReadSignal<SortColumn>,
     sort_direction: ReadSignal<SortDirection>,
-    on_sort: impl Fn(SortColumn) + 'static + Copy + Send,
+    on_sort: impl Fn(SortColumn) + 'static + Copy + Send + Sync,
 ) -> impl IntoView {
     fn is_under_root(file_path: &str, root: &str) -> bool {
         let mut r = root.replace('/', "\\").to_lowercase();
@@ -1352,119 +1383,234 @@ fn GroupedFileList(
 
     view! {
         <div class="file-list">
-            <For
-                each=move || {
-                    let roots_vec = roots.get();
-                    let all = files();
-                    roots_vec.into_iter().map(|r| {
-                        let v = all
-                            .iter()
-                            .cloned()
-                            .filter(|f| is_under_root(&f.path, &r))
-                            .collect::<Vec<_>>();
-                        (r, v)
-                    }).collect::<Vec<_>>()
-                }
-                key=|grp: &(String, Vec<DisplayFile>)| grp.0.clone()
-                children=move |grp: (String, Vec<DisplayFile>)| {
-                    let r = grp.0.clone();
-                    let group_files = grp.1.clone();
-                    let group_files_for_empty = group_files.clone();
-                    view! {
-                        <div class="file-group">
-                            <div class="group-header">{r.clone()}</div>
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th></th>
-                                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Name)>
-                                            "File Name" {move || sort_indicator(SortColumn::Name)}
-                                        </th>
-                                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Type)>
-                                            "Type" {move || sort_indicator(SortColumn::Type)}
-                                        </th>
-                                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Size)>
-                                            "Size" {move || sort_indicator(SortColumn::Size)}
-                                        </th>
-                                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Date)>
-                                            "Modified" {move || sort_indicator(SortColumn::Date)}
-                                        </th>
-                                        <th>"Tags"</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
+            {move || {
+                let all = files();
+                let roots_vec = roots.get();
+                let filter = active_root_filter.get();
+                let groups: Vec<(String, Vec<DisplayFile>)> = roots_vec.into_iter().map(|r| {
+                    if let Some(ref f) = filter {
+                        if &r != f { return (r.clone(), Vec::<DisplayFile>::new()); }
+                    }
+                    let v = all
+                        .iter()
+                        .cloned()
+                        .filter(|f| is_under_root(&f.path, &r))
+                        .collect::<Vec<_>>();
+                    (r, v)
+                }).collect();
+
+                let total: usize = groups.iter().map(|(_, v)| v.len()).sum();
+
+                view! {
+                    <Show
+                        when=move || total == 0
+                        fallback=move || {
+                            let groups_clone = groups.clone();
+                            view! {
+                                <div>
                                     <For
-                                        each=move || group_files.clone()
-                                        key=|file| file.path.clone()
-                                        children=move |file| {
-                                            let file_path = file.path.clone();
-                                            let file_path_for_toggle = file_path.clone();
-                                            let file_path_for_class = file_path.clone();
-                                            let file_path_for_checked = file_path.clone();
-                                            let file_path_for_dblclick = file_path.clone();
-                                            let tags_check = file.tags.clone();
-                                            let tags_loop = file.tags.clone();
+                                        each=move || groups_clone.clone()
+                                        key=|grp: &(String, Vec<DisplayFile>)| grp.0.clone()
+                                        children=move |grp: (String, Vec<DisplayFile>)| {
+                                            let r = grp.0.clone();
+                                            let group_files = grp.1.clone();
+                                            let group_files_for_empty = group_files.clone();
                                             view! {
-                                                <tr
-                                                    class:selected=move || selected_file_paths.get().contains(&file_path_for_class)
-                                                    on:dblclick=move |_| {
-                                                        let path = file_path_for_dblclick.clone();
-                                                        spawn_local(async move {
-                                                            let args = OpenFileArgs { path };
-                                                            let _ = invoke("open_file", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                        });
-                                                    }
-                                                >
-                                                    <td on:dblclick=|e| e.stop_propagation()>
-                                                        <input
-                                                            type="checkbox"
-                                                            checked=move || selected_file_paths.get().contains(&file_path_for_checked)
-                                                            on:change=move |_| on_toggle(file_path_for_toggle.clone())
-                                                        />
-                                                    </td>
-                                                    <td class="file-path" title=file.path.clone()>
-                                                        {if file.is_directory { "📁 " } else { "" }}
-                                                        {file.name.clone()}
-                                                    </td>
-                                                    <td>
-                                                        {if file.is_directory { "Folder".to_string() } else { file.extension.clone() }}
-                                                    </td>
-                                                    <td>{format_file_size(file.size_bytes)}</td>
-                                                    <td>{format_timestamp(file.last_modified)}</td>
-                                                    <td class="file-tags">
-                                                        <Show
-                                                            when=move || !tags_check.is_empty()
-                                                            fallback=|| view! { <span class="not-in-db">"Not tagged"</span> }
-                                                        >
-                                                            {
-                                                                let tags_inner = tags_loop.clone();
-                                                                view! {
-                                                                    <For
-                                                                        each=move || tags_inner.clone()
-                                                                        key=|tag| tag.id
-                                                                        children=move |tag| {
-                                                                            view! {
-                                                                                <span class="tag-badge" style=move || tag.color.clone().map(|c| format!("background-color: {}", c)).unwrap_or_default()>
-                                                                                    {tag.name.clone()}
-                                                                                </span>
+                                                <div class="file-group">
+                                                    <div class="group-header">{r.clone()}</div>
+                                                    <table>
+                                                        <thead>
+                                                            <tr>
+                                                                <th></th>
+                                                                <th class="sortable" on:click=move |_| on_sort(SortColumn::Name)>
+                                                                    "File Name" {move || sort_indicator(SortColumn::Name)}
+                                                                </th>
+                                                                <th class="sortable" on:click=move |_| on_sort(SortColumn::Type)>
+                                                                    "Type" {move || sort_indicator(SortColumn::Type)}
+                                                                </th>
+                                                                <th class="sortable" on:click=move |_| on_sort(SortColumn::Size)>
+                                                                    "Size" {move || sort_indicator(SortColumn::Size)}
+                                                                </th>
+                                                                <th class="sortable" on:click=move |_| on_sort(SortColumn::Date)>
+                                                                    "Modified" {move || sort_indicator(SortColumn::Date)}
+                                                                </th>
+                                                                <th>"Tags"</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            <For
+                                                                each=move || group_files.clone()
+                                                                key=|file| file.path.clone()
+                                                                children=move |file| {
+                                                                    let file_path = file.path.clone();
+                                                                    let file_path_for_toggle = file_path.clone();
+                                                                    let file_path_for_class = file_path.clone();
+                                                                    let file_path_for_checked = file_path.clone();
+                                                                    let file_path_for_dblclick = file_path.clone();
+                                                                    let tags_check = file.tags.clone();
+                                                                    let tags_loop = file.tags.clone();
+                                                                    view! {
+                                                                        <tr
+                                                                            class:selected=move || selected_file_paths.get().contains(&file_path_for_class)
+                                                                            on:dblclick=move |_| {
+                                                                                let path = file_path_for_dblclick.clone();
+                                                                                spawn_local(async move {
+                                                                                    let args = OpenFileArgs { path };
+                                                                                    let _ = invoke("open_file", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                                                });
                                                                             }
-                                                                        }
-                                                                    />
+                                                                        >
+                                                                            <td on:dblclick=|e| e.stop_propagation()>
+                                                                                <input
+                                                                                    type="checkbox"
+                                                                                    checked=move || selected_file_paths.get().contains(&file_path_for_checked)
+                                                                                    on:change=move |_| on_toggle(file_path_for_toggle.clone())
+                                                                                />
+                                                                            </td>
+                                                                            <td class="file-path" title=file.path.clone()>
+                                                                                {if file.is_directory { "📁 " } else { "" }}
+                                                                                {file.name.clone()}
+                                                                            </td>
+                                                                            <td>
+                                                                                {if file.is_directory { "Folder".to_string() } else { file.extension.clone() }}
+                                                                            </td>
+                                                                            <td>{format_file_size(file.size_bytes)}</td>
+                                                                            <td>{format_timestamp(file.last_modified)}</td>
+                                                                            <td class="file-tags">
+                                                                                <Show
+                                                                                    when=move || !tags_check.is_empty()
+                                                                                    fallback=|| view! { <span class="not-in-db">"Not tagged"</span> }
+                                                                                >
+                                                                                    {
+                                                                                        let tags_inner = tags_loop.clone();
+                                                                                        view! {
+                                                                                            <For
+                                                                                                each=move || tags_inner.clone()
+                                                                                                key=|tag| tag.id
+                                                                                                children=move |tag| {
+                                                                                                    view! {
+                                                                                                        <span class="tag-badge" style=move || tag.color.clone().map(|c| format!("background-color: {}", c)).unwrap_or_default()>
+                                                                                                            {tag.name.clone()}
+                                                                                                        </span>
+                                                                                                    }
+                                                                                                }
+                                                                                            />
+                                                                                        }
+                                                                                    }
+                                                                                </Show>
+                                                                            </td>
+                                                                        </tr>
+                                                                    }
                                                                 }
-                                                            }
-                                                        </Show>
-                                                    </td>
-                                                </tr>
+                                                            />
+                                                            {move || if group_files_for_empty.is_empty() { Some(view! { <tr><td colspan="6"><em>"No files in this root"</em></td></tr> }) } else { None }}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
                                             }
                                         }
                                     />
-                                    {move || if group_files_for_empty.is_empty() { Some(view! { <tr><td colspan="6"><em>"No files in this root"</em></td></tr> }) } else { None }}
-                                </tbody>
-                            </table>
-                        </div>
-                    }
+                                </div>
+                            }
+                        }
+                    >
+                        {
+                            let all_clone = all.clone();
+                            view! {
+                                <div>
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th></th>
+                                            <th class="sortable" on:click=move |_| on_sort(SortColumn::Name)>
+                                                "File Name" {move || sort_indicator(SortColumn::Name)}
+                                            </th>
+                                            <th class="sortable" on:click=move |_| on_sort(SortColumn::Type)>
+                                                "Type" {move || sort_indicator(SortColumn::Type)}
+                                            </th>
+                                            <th class="sortable" on:click=move |_| on_sort(SortColumn::Size)>
+                                                "Size" {move || sort_indicator(SortColumn::Size)}
+                                            </th>
+                                            <th class="sortable" on:click=move |_| on_sort(SortColumn::Date)>
+                                                "Modified" {move || sort_indicator(SortColumn::Date)}
+                                            </th>
+                                            <th>"Tags"</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <For
+                                            each=move || all_clone.clone()
+                                            key=|file| file.path.clone()
+                                            children=move |file| {
+                                                let file_path = file.path.clone();
+                                                let file_path_for_toggle = file_path.clone();
+                                                let file_path_for_class = file_path.clone();
+                                                let file_path_for_checked = file_path.clone();
+                                                let file_path_for_dblclick = file_path.clone();
+                                                let tags_check = file.tags.clone();
+                                                let tags_loop = file.tags.clone();
+                                                view! {
+                                                    <tr
+                                                        class:selected=move || selected_file_paths.get().contains(&file_path_for_class)
+                                                        on:dblclick=move |_| {
+                                                            let path = file_path_for_dblclick.clone();
+                                                            spawn_local(async move {
+                                                                let args = OpenFileArgs { path };
+                                                                let _ = invoke("open_file", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                            });
+                                                        }
+                                                    >
+                                                        <td on:dblclick=|e| e.stop_propagation()>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked=move || selected_file_paths.get().contains(&file_path_for_checked)
+                                                                on:change=move |_| on_toggle(file_path_for_toggle.clone())
+                                                            />
+                                                        </td>
+                                                        <td class="file-path" title=file.path.clone()>
+                                                            {if file.is_directory { "📁 " } else { "" }}
+                                                            {file.name.clone()}
+                                                        </td>
+                                                        <td>
+                                                            {if file.is_directory { "Folder".to_string() } else { file.extension.clone() }}
+                                                        </td>
+                                                        <td>{format_file_size(file.size_bytes)}</td>
+                                                        <td>{format_timestamp(file.last_modified)}</td>
+                                                        <td class="file-tags">
+                                                            <Show
+                                                                when=move || !tags_check.is_empty()
+                                                                fallback=|| view! { <span class="not-in-db">"Not tagged"</span> }
+                                                            >
+                                                                {
+                                                                    let tags_inner = tags_loop.clone();
+                                                                    view! {
+                                                                        <For
+                                                                            each=move || tags_inner.clone()
+                                                                            key=|tag| tag.id
+                                                                            children=move |tag| {
+                                                                                view! {
+                                                                                    <span class="tag-badge" style=move || tag.color.clone().map(|c| format!("background-color: {}", c)).unwrap_or_default()>
+                                                                                        {tag.name.clone()}
+                                                                                    </span>
+                                                                                }
+                                                                            }
+                                                                        />
+                                                                    }
+                                                                }
+                                                            </Show>
+                                                        </td>
+                                                    </tr>
+                                                }
+                                            }
+                                        />
+                                    </tbody>
+                                </table>
+                                </div>
+                            }
+                        }
+                    </Show>
                 }
-            />
+            }}
         </div>
     }
 }
