@@ -235,23 +235,26 @@ pub fn App() -> impl IntoView {
             });
         }
 
-        // Add scanned files that are not in DB
-        for file in scanned {
-            if !seen_paths.contains(&file.path) {
-                let path_obj = std::path::Path::new(&file.path);
-                let name = path_obj.file_name().unwrap_or_default().to_string_lossy().to_string();
-                let extension = path_obj.extension().unwrap_or_default().to_string_lossy().to_string();
-                
-                display_files.push(DisplayFile {
-                    path: file.path.clone(),
-                    name,
-                    extension,
-                    size_bytes: file.size_bytes,
-                    last_modified: file.last_modified,
-                    db_id: None,
-                    tags: Vec::new(),
-                    is_directory: file.is_directory,
-                });
+        // Add scanned files that are not in DB (only when no tag filter is active)
+        let has_tag_filter = !selected_tag_ids.get().is_empty();
+        if !has_tag_filter {
+            for file in scanned {
+                if !seen_paths.contains(&file.path) {
+                    let path_obj = std::path::Path::new(&file.path);
+                    let name = path_obj.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let extension = path_obj.extension().unwrap_or_default().to_string_lossy().to_string();
+                    
+                    display_files.push(DisplayFile {
+                        path: file.path.clone(),
+                        name,
+                        extension,
+                        size_bytes: file.size_bytes,
+                        last_modified: file.last_modified,
+                        db_id: None,
+                        tags: Vec::new(),
+                        is_directory: file.is_directory,
+                    });
+                }
             }
         }
 
@@ -1206,6 +1209,35 @@ fn TagNode(
                 <span class="tag-name" style=move || tag.color.clone().map(|c| format!("color: {}", c)).unwrap_or_default()>
                     {tag.name.clone()}
                 </span>
+                <button
+                    class="tag-delete"
+                    title="Delete Tag"
+                    style="margin-left:6px; border:none; background:transparent; color:#c00; cursor:pointer;"
+                    on:mousedown=move |ev: web_sys::MouseEvent| {
+                        ev.stop_propagation();
+                        ev.prevent_default();
+                    }
+                    on:click=move |ev: web_sys::MouseEvent| {
+                        ev.stop_propagation();
+                        ev.prevent_default();
+                        let has_kids = has_children();
+                        let ok = if has_kids {
+                            web_sys::window()
+                                .and_then(|w| w.confirm_with_message(&format!("Delete tag '{}' and its children?", tag.name)).ok())
+                                .unwrap_or(false)
+                        } else {
+                            true
+                        };
+                        if ok {
+                            let id = tag_id;
+                            spawn_local(async move {
+                                let args = DeleteTagArgs { id };
+                                let _ = invoke("delete_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                            });
+                            set_reload_tags_trigger.update(|v| *v += 1);
+                        }
+                    }
+                >"×"</button>
             </label>
             {move || has_children().then(|| view! {
                 <div class="tag-children">
