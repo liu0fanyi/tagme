@@ -233,6 +233,37 @@ fn load_window_state(app_handle: tauri::AppHandle) -> Option<db::WindowState> {
     db::load_window_state(&app_handle).ok().flatten()
 }
 
+#[tauri::command]
+fn open_file(path: String) -> Result<(), String> {
+    eprintln!("📂 Opening file: {}", path);
+    
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -311,7 +342,8 @@ pub fn run() {
             get_file_tags,
             filter_files_by_tags,
             save_window_state,
-            load_window_state
+            load_window_state,
+            open_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

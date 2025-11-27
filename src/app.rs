@@ -131,6 +131,12 @@ struct ScanFilesArgs {
     root_path: String,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenFileArgs {
+    path: String,
+}
+
 
 fn format_file_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -417,6 +423,22 @@ pub fn App() -> impl IntoView {
                 });
             } else {
                 web_sys::console::log_1(&"⚠️ [FRONTEND] No saved directory, skipping auto-start watcher".into());
+            }
+
+            // Perform initial lightweight scan if root directory exists
+            if let Some(scan_path) = root.clone() {
+                web_sys::console::log_1(&format!("🔍 [FRONTEND] Performing initial scan for: {}", scan_path).into());
+                spawn_local(async move {
+                    let args = ScanFilesArgs { root_path: scan_path };
+                    if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
+                        invoke("scan_files", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                    ) {
+                        web_sys::console::log_1(&format!("✅ [FRONTEND] Initial scan complete, {} files found", files.len()).into());
+                        set_scanned_files.set(files);
+                        // Refresh DB files as well to ensure consistency
+                        load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
+                    }
+                });
             }
             
             // Setup file system change listener
@@ -1146,11 +1168,22 @@ fn FileList(
                             let file_path_for_class = file_path.clone();
                             let file_path_for_checked = file_path.clone();
                             
+                            let file_path_for_dblclick = file_path.clone();
+                            
                                     let tags_check = file.tags.clone();
                                     let tags_loop = file.tags.clone();
                                     
                                     view! {
-                                        <tr class:selected=move || selected_file_paths.get().contains(&file_path_for_class)>
+                                        <tr
+                                            class:selected=move || selected_file_paths.get().contains(&file_path_for_class)
+                                            on:dblclick=move |_| {
+                                                let path = file_path_for_dblclick.clone();
+                                                spawn_local(async move {
+                                                    let args = OpenFileArgs { path };
+                                                    let _ = invoke("open_file", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                });
+                                            }
+                                        >
                                             <td>
                                                 <input
                                                     type="checkbox"
