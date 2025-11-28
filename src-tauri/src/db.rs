@@ -60,6 +60,7 @@ pub fn init_db(app_handle: &AppHandle) -> Result<()> {
     }
 
     let conn = Connection::open(&db_path)?;
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
 
     // Roots table
     conn.execute(
@@ -170,23 +171,36 @@ pub fn init_db(app_handle: &AppHandle) -> Result<()> {
 
         eprintln!("🏷️  数据库为空，正在创建默认tag...");
 
-        // 创建默认的tag
-        let default_tags = vec![
-            ("工作", None, Some("#FF6B6B")),
-            ("个人", None, Some("#4ECDC4")),
-            ("重要", None, Some("#45B7D1")),
-            ("项目A", Some(1), Some("#96CEB4")),
-            ("项目B", Some(1), Some("#FECA57")),
-            ("学习", Some(2), Some("#DDA0DD")),
-            ("娱乐", Some(2), Some("#98D8C8")),
-        ];
-
-        for (name, parent_id, color) in default_tags {
+        // 先创建顶级标签并记录ID
+        let mut parent_ids: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+        for (name, color) in [("工作", Some("#FF6B6B")), ("个人", Some("#4ECDC4")), ("重要", Some("#45B7D1"))] {
             conn.execute(
-                "INSERT INTO tags (name, parent_id, color, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![name, parent_id, color, now],
+                "INSERT INTO tags (name, parent_id, color, created_at) VALUES (?1, NULL, ?2, ?3)",
+                params![name, color, now],
             )?;
-            eprintln!("   ✅ 创建tag: {}", name);
+            let id = conn.last_insert_rowid();
+            parent_ids.insert(name, id);
+            eprintln!("   ✅ 创建tag: {} (id={})", name, id);
+        }
+
+        // 创建子标签，使用实际父ID
+        if let Some(&work_id) = parent_ids.get("工作") {
+            for (name, color) in [("项目A", Some("#96CEB4")), ("项目B", Some("#FECA57"))] {
+                conn.execute(
+                    "INSERT INTO tags (name, parent_id, color, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![name, work_id as i64, color, now],
+                )?;
+                eprintln!("   ✅ 创建tag: {} (parent=工作)", name);
+            }
+        }
+        if let Some(&personal_id) = parent_ids.get("个人") {
+            for (name, color) in [("学习", Some("#DDA0DD")), ("娱乐", Some("#98D8C8"))] {
+                conn.execute(
+                    "INSERT INTO tags (name, parent_id, color, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    params![name, personal_id as i64, color, now],
+                )?;
+                eprintln!("   ✅ 创建tag: {} (parent=个人)", name);
+            }
         }
 
         eprintln!("🎉 默认tag创建完成！");
@@ -673,11 +687,19 @@ pub fn create_tag(
         .as_secs() as i64;
 
     // Get max position for this parent
-    let max_position: i32 = conn.query_row(
-        "SELECT COALESCE(MAX(position), -1) FROM tags WHERE parent_id IS ?1",
-        params![parent_id],
-        |row| row.get(0),
-    ).unwrap_or(-1);
+    let max_position: i32 = if let Some(pid) = parent_id {
+        conn.query_row(
+            "SELECT COALESCE(MAX(position), -1) FROM tags WHERE parent_id = ?1",
+            params![pid],
+            |row| row.get(0),
+        ).unwrap_or(-1)
+    } else {
+        conn.query_row(
+            "SELECT COALESCE(MAX(position), -1) FROM tags WHERE parent_id IS NULL",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(-1)
+    };
     
     let new_position = max_position + 1;
 
@@ -730,6 +752,7 @@ pub fn update_tag(
 
 pub fn delete_tag(app_handle: &AppHandle, id: u32) -> Result<()> {
     let conn = Connection::open(get_db_path(app_handle))?;
+    let _ = conn.execute("PRAGMA foreign_keys = ON", [])?;
     conn.execute("DELETE FROM tags WHERE id = ?1", params![id])?;
     Ok(())
 }
@@ -738,12 +761,17 @@ pub fn delete_tag(app_handle: &AppHandle, id: u32) -> Result<()> {
 fn reorder_tags_in_parent(conn: &Connection, parent_id: Option<u32>) -> Result<()> {
     eprintln!("🔧 [DB] reorder_tags_in_parent: parent={:?}", parent_id);
     // Get all tags in this parent, ordered by current position
-    let mut stmt = conn.prepare(
-        "SELECT id FROM tags WHERE parent_id IS ?1 ORDER BY position"
-    )?;
+    let mut stmt = if parent_id.is_some() {
+        conn.prepare("SELECT id FROM tags WHERE parent_id = ?1 ORDER BY position")?
+    } else {
+        conn.prepare("SELECT id FROM tags WHERE parent_id IS NULL ORDER BY position")?
+    };
 
-    let tag_ids: Vec<u32> = stmt
-        .query_map(params![parent_id], |row| row.get(0))?
+    let tag_ids: Vec<u32> = if let Some(pid) = parent_id {
+        stmt.query_map(params![pid], map_tag_id)?
+    } else {
+        stmt.query_map([], map_tag_id)?
+    }
         .collect::<Result<Vec<_>, _>>()?;
 
     eprintln!("🔧 [DB] Found {} tags to reorder: {:?}", tag_ids.len(), tag_ids);
@@ -789,16 +817,30 @@ pub fn move_tag(
 
         if current_pos < target_position {
             // Moving forward: shift tags between current_pos+1 and target_position down by 1
-            conn.execute(
-                "UPDATE tags SET position = position - 1 WHERE parent_id IS ?1 AND position > ?2 AND position <= ?3 AND id != ?4",
-                params![new_parent_id, current_pos, target_position, id],
-            )?;
+            if let Some(pid) = new_parent_id {
+                conn.execute(
+                    "UPDATE tags SET position = position - 1 WHERE parent_id = ?1 AND position > ?2 AND position <= ?3 AND id != ?4",
+                    params![pid, current_pos, target_position, id],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE tags SET position = position - 1 WHERE parent_id IS NULL AND position > ?1 AND position <= ?2 AND id != ?3",
+                    params![current_pos, target_position, id],
+                )?;
+            }
         } else if current_pos > target_position {
             // Moving backward: shift tags between target_position and current_pos-1 up by 1
-            conn.execute(
-                "UPDATE tags SET position = position + 1 WHERE parent_id IS ?1 AND position >= ?2 AND position < ?3 AND id != ?4",
-                params![new_parent_id, target_position, current_pos, id],
-            )?;
+            if let Some(pid) = new_parent_id {
+                conn.execute(
+                    "UPDATE tags SET position = position + 1 WHERE parent_id = ?1 AND position >= ?2 AND position < ?3 AND id != ?4",
+                    params![pid, target_position, current_pos, id],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE tags SET position = position + 1 WHERE parent_id IS NULL AND position >= ?1 AND position < ?2 AND id != ?3",
+                    params![target_position, current_pos, id],
+                )?;
+            }
         }
     }
 
@@ -971,3 +1013,4 @@ pub fn load_window_state(app_handle: &AppHandle) -> Result<Option<WindowState>> 
         Err(e) => Err(e),
     }
 }
+fn map_tag_id(row: &rusqlite::Row) -> rusqlite::Result<u32> { row.get(0) }

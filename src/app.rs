@@ -282,6 +282,8 @@ pub fn App() -> impl IntoView {
     let (new_tag_parent, set_new_tag_parent) = signal(None::<u32>);
     let (new_tag_input_sidebar, set_new_tag_input_sidebar) = signal(String::new());
     let (show_purge_confirm, set_show_purge_confirm) = signal(false);
+    let (show_delete_tag_confirm, set_show_delete_tag_confirm) = signal(false);
+    let (delete_target_tag_id, set_delete_target_tag_id) = signal(None::<u32>);
     
     // Sorting state
     let (sort_column, set_sort_column) = signal(SortColumn::Name);
@@ -989,6 +991,10 @@ pub fn App() -> impl IntoView {
                     <TagTree
                         tags=all_tags
                         selected_tag_ids=selected_tag_ids
+                        set_selected_tag_ids=set_selected_tag_ids
+                        use_and_logic=use_and_logic
+                        set_displayed_files=set_displayed_files
+                        all_files=all_files
                         on_toggle=toggle_tag_selection
                         _set_all_tags=set_all_tags
                         dragging_tag_id=dragging_tag_id
@@ -998,6 +1004,8 @@ pub fn App() -> impl IntoView {
                         drop_position=drop_position
                         set_drop_position=set_drop_position
                         set_reload_tags_trigger=set_reload_tags_trigger
+                        set_show_delete_tag_confirm=set_show_delete_tag_confirm
+                        set_delete_target_tag_id=set_delete_target_tag_id
                     />
                 </div>
 
@@ -1314,6 +1322,65 @@ pub fn App() -> impl IntoView {
                 </div>
             })}
 
+            {move || show_delete_tag_confirm.get().then(|| view! {
+                <div class="modal-overlay" on:click=move |_| set_show_delete_tag_confirm.set(false)>
+                    <div class="modal" on:click={|e| e.stop_propagation()}>
+                        {move || {
+                            let tid_opt = delete_target_tag_id.get();
+                            let name = tid_opt.and_then(|tid| all_tags.get().iter().find(|t| t.id == tid).map(|t| t.name.clone())).unwrap_or_else(|| "".to_string());
+                            view! { <h3>{format!("Delete tag '{}' ?", name)}</h3> }
+                        }}
+                        <p>"This will also delete its child tags and relationships."</p>
+                        <div style="display:flex; gap:8px;">
+                            <button on:click={
+                                let set_modal = set_show_delete_tag_confirm;
+                                let set_sel = set_selected_tag_ids;
+                                let sel_ids = selected_tag_ids;
+                                let tags_sig = all_tags;
+                                let use_and = use_and_logic;
+                                let set_disp = set_displayed_files;
+                                let all_files_sig = all_files;
+                                let set_reload = set_reload_tags_trigger;
+                                let del_tid_sig = delete_target_tag_id;
+                                move |_| {
+                                    let maybe_id = del_tid_sig.get_untracked();
+                                    if let Some(id) = maybe_id {
+                                        let mut current = sel_ids.get_untracked();
+                                        let all = tags_sig.get_untracked();
+                                        let mut stack = vec![id];
+                                        let mut subtree_ids: Vec<u32> = Vec::new();
+                                        while let Some(x) = stack.pop() {
+                                            subtree_ids.push(x);
+                                            for t in all.iter().filter(|t| t.parent_id == Some(x)) { stack.push(t.id); }
+                                        }
+                                        let remove_set: std::collections::HashSet<u32> = subtree_ids.iter().copied().collect();
+                                        current.retain(|tid| !remove_set.contains(tid));
+                                        set_sel.set(current.clone());
+                                        let logic = use_and.get_untracked();
+                                        if current.is_empty() {
+                                            set_disp.set(all_files_sig.get_untracked());
+                                        } else {
+                                            filter_files(current.clone(), logic, set_disp, all_files_sig.get_untracked());
+                                        }
+                                        spawn_local(async move {
+                                            let args = DeleteTagArgs { id };
+                                            let res = invoke("delete_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                            match serde_wasm_bindgen::from_value::<()> (res.clone()) {
+                                                Ok(_) => web_sys::console::log_1(&format!("[UI] delete_tag ok: {}", id).into()),
+                                                Err(e) => web_sys::console::error_1(&format!("[UI] delete_tag error: {:?}; raw={:?}", e, res).into()),
+                                            }
+                                        });
+                                        set_reload.update(|v| *v += 1);
+                                        set_modal.set(false);
+                                    }
+                                }
+                            }>"Confirm"</button>
+                            <button on:click=move |_| set_show_delete_tag_confirm.set(false)>"Cancel"</button>
+                        </div>
+                    </div>
+                </div>
+            })}
+
             {move || batch_running.get().then(|| view! {
                 <div class="overlay-blocker" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.55);z-index:2000;display:flex;align-items:center;justify-content:center;">
                     <div class="overlay-card">
@@ -1333,6 +1400,12 @@ pub fn App() -> impl IntoView {
 fn TagTree(
     tags: ReadSignal<Vec<TagInfo>>,
     selected_tag_ids: ReadSignal<Vec<u32>>,
+    set_selected_tag_ids: WriteSignal<Vec<u32>>,
+    use_and_logic: ReadSignal<bool>,
+    set_displayed_files: WriteSignal<Vec<FileInfo>>,
+    all_files: ReadSignal<Vec<FileInfo>>,
+    set_show_delete_tag_confirm: WriteSignal<bool>,
+    set_delete_target_tag_id: WriteSignal<Option<u32>>,
     on_toggle: impl Fn(u32) + 'static + Copy + Send,
     _set_all_tags: WriteSignal<Vec<TagInfo>>,
     dragging_tag_id: ReadSignal<Option<u32>>,
@@ -1361,6 +1434,12 @@ fn TagTree(
                             tag=tag
                             all_tags=tags
                             selected_tag_ids=selected_tag_ids
+                            set_selected_tag_ids=set_selected_tag_ids
+                            use_and_logic=use_and_logic
+                            set_displayed_files=set_displayed_files
+                            all_files=all_files
+                            set_show_delete_tag_confirm=set_show_delete_tag_confirm
+                            set_delete_target_tag_id=set_delete_target_tag_id
                             on_toggle=on_toggle
                             level=0
                             dragging_tag_id=dragging_tag_id
@@ -1383,6 +1462,12 @@ fn TagNode(
     tag: TagInfo,
     all_tags: ReadSignal<Vec<TagInfo>>,
     selected_tag_ids: ReadSignal<Vec<u32>>,
+    set_selected_tag_ids: WriteSignal<Vec<u32>>,
+    use_and_logic: ReadSignal<bool>,
+    set_displayed_files: WriteSignal<Vec<FileInfo>>,
+    all_files: ReadSignal<Vec<FileInfo>>,
+    set_show_delete_tag_confirm: WriteSignal<bool>,
+    set_delete_target_tag_id: WriteSignal<Option<u32>>,
     on_toggle: impl Fn(u32) + 'static + Copy + Send,
     level: usize,
     dragging_tag_id: ReadSignal<Option<u32>>,
@@ -1510,22 +1595,8 @@ fn TagNode(
                     on:click=move |ev: web_sys::MouseEvent| {
                         ev.stop_propagation();
                         ev.prevent_default();
-                        let has_kids = has_children();
-                        let ok = if has_kids {
-                            web_sys::window()
-                                .and_then(|w| w.confirm_with_message(&format!("Delete tag '{}' and its children?", tag.name)).ok())
-                                .unwrap_or(false)
-                        } else {
-                            true
-                        };
-                        if ok {
-                            let id = tag_id;
-                            spawn_local(async move {
-                                let args = DeleteTagArgs { id };
-                                let _ = invoke("delete_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                            });
-                            set_reload_tags_trigger.update(|v| *v += 1);
-                        }
+                        set_delete_target_tag_id.set(Some(tag_id));
+                        set_show_delete_tag_confirm.set(true);
                     }
                 >"×"</button>
             </label>
@@ -1540,6 +1611,12 @@ fn TagNode(
                                     tag=child
                                     all_tags=all_tags
                                     selected_tag_ids=selected_tag_ids
+                                    set_selected_tag_ids=set_selected_tag_ids
+                                    use_and_logic=use_and_logic
+                                    set_displayed_files=set_displayed_files
+                                    all_files=all_files
+                                    set_show_delete_tag_confirm=set_show_delete_tag_confirm
+                                    set_delete_target_tag_id=set_delete_target_tag_id
                                     on_toggle=on_toggle
                                     level=level + 1
                                     dragging_tag_id=dragging_tag_id

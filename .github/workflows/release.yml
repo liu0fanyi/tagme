@@ -60,16 +60,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'TodoList v__VERSION__'
+          releaseName: 'TagMe ${{ github.ref_name }}'
           releaseBody: |
-            ## What's New in v0.1.1
+            ## What's New in ${{ github.ref_name }}
             
-            - **Window Persistence**: The application now remembers its size, position, and "Always on Top" status across restarts.
-            - **Single Instance**: Restricted the application to a single running instance. Launching a second instance focuses the existing one.
-            - **Bug Fixes**: Fixed compilation errors and Leptos 0.7 migration issues.
-            
-            ## Download
-            See the assets below to download and install.
+            - Confirm modal for database purge to prevent accidental deletion
+            - Folder tagging support (is_directory + stable pseudo-hash)
+            - Fix right panel tagging logic (works for scanned files and folders)
+            - Backend/frontend diagnostic logs for DB operations
+            - Version aligned to 0.1.0
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
