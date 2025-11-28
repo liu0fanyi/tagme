@@ -199,6 +199,29 @@ pub fn App() -> impl IntoView {
     let (batch_progress, set_batch_progress) = signal(0usize);
     let (batch_total, set_batch_total) = signal(0usize);
     let (batch_cancel, set_batch_cancel) = signal(false);
+    Effect::new(move |_| {
+        let running = batch_running.get();
+        if let Some(win) = web_sys::window() {
+            if let Some(doc) = win.document() {
+                if let Some(body) = doc.body() {
+                    let _ = body.style().set_property("overflow", if running { "hidden" } else { "" });
+                }
+            }
+        }
+        if running {
+            web_sys::console::log_1(&"[Overlay] on".into());
+            if let Some(win) = web_sys::window() {
+                let set_cancel = set_batch_cancel;
+                let on_key = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+                    if e.key() == "Escape" { set_cancel.set(true); }
+                });
+                let _ = win.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+                on_key.forget();
+            }
+        } else {
+            web_sys::console::log_1(&"[Overlay] off".into());
+        }
+    });
     let recommend_all = move |_| {
         if batch_running.get() { return; }
         let files = displayed_files.get();
@@ -250,100 +273,6 @@ pub fn App() -> impl IntoView {
             set_info.set(info_map);
             set_run.set(false);
             set_batch_cancel.set(false);
-        });
-    };
-    let recommend_selected = move |_| {
-        let tags = all_tags.get();
-        let selected = selected_file_paths.get();
-        if selected.is_empty() { return; }
-        let path = selected[0].clone();
-        web_sys::console::log_1(&format!("[LLM] selected path={}", path).into());
-        let set_info = set_file_recommended_info_map;
-        let current_map = file_recommended_info_map.get();
-        let set_show = set_show_recommended;
-        spawn_local(async move {
-            let title = std::path::Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            if title.is_empty() { web_sys::console::log_1(&"[LLM] empty title".into()); return; }
-            let label_names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
-            #[derive(Serialize)]
-            #[serde(rename_all = "camelCase")]
-            struct LlmArgs { title: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
-            let tk = core::cmp::min(label_names.len(), 8);
-            let args = LlmArgs { title: title.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: None, model: None };
-            web_sys::console::log_1(&format!("[LLM] request: title='{}', labels={}, tk={}", title, serde_json::to_string(&label_names).unwrap_or_default(), tk).into());
-            let val = invoke("generate_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-            match serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
-                Ok(list) => {
-                    web_sys::console::log_1(&format!("[LLM] items=[{}]", list.iter().map(|ri| format!("{}:{:.3}:{}", ri.name, ri.score, ri.source)).collect::<Vec<_>>().join(", ")).into());
-                    let mut map = current_map.clone();
-                    map.insert(path.clone(), list);
-                    set_info.set(map);
-                    set_show.set(true);
-                },
-                Err(e) => {
-                    web_sys::console::log_1(&format!("[LLM] error={:?}", e).into());
-                }
-            }
-        });
-    };
-    let compute_title_recommendations = move |_| {
-        web_sys::console::log_1(&"[Recommend] computing title-based tags (LLM bulk, throttled)".into());
-        let files = displayed_files.get();
-        let tags = all_tags.get();
-        let set_map = set_file_recommended_tags_map;
-        let set_show = set_show_recommended;
-        let max_files = core::cmp::min(files.len(), 20);
-        spawn_local(async move {
-            let mut map = std::collections::HashMap::new();
-            let mut info_map = std::collections::HashMap::new();
-            let mut total_buttons = 0usize;
-            for (idx, f) in files.iter().take(max_files).enumerate() {
-                let path_obj = std::path::Path::new(&f.path);
-                let title = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                if title.is_empty() { continue; }
-                let label_names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
-                #[derive(Serialize)]
-                #[serde(rename_all = "camelCase")]
-                struct LlmArgs { title: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
-                let tk = core::cmp::min(label_names.len(), 8);
-                let args = LlmArgs { title: title.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: None, model: None };
-                let val = invoke("generate_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                let recs = match serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
-                    Ok(list) => list,
-                    Err(_) => {
-                        let lname = title.to_lowercase();
-                        let tokens: Vec<&str> = lname.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).collect();
-                        let mut scored: Vec<(TagInfo, i32)> = Vec::new();
-                        for t in &tags {
-                            let tname = t.name.to_lowercase();
-                            let mut score = 0;
-                            if !tname.is_empty() {
-                                if lname.contains(&tname) { score += 10; }
-                                if tokens.iter().any(|w| *w == tname) { score += 8; }
-                                if lname.starts_with(&tname) || lname.ends_with(&tname) { score += 4; }
-                            }
-                            if score > 0 { scored.push((t.clone(), score)); }
-                        }
-                        scored.sort_by(|a, b| b.1.cmp(&a.1));
-                        scored.into_iter().take(3).map(|(t, _)| RecommendItem { name: t.name.clone(), score: 0.0, source: String::from("rule") }).collect()
-                    }
-                };
-                let mut tag_out: Vec<TagInfo> = Vec::new();
-                for item in recs.iter() {
-                    if let Some(t) = tags.iter().find(|x| x.name == item.name) { tag_out.push(t.clone()); }
-                }
-                total_buttons += tag_out.len();
-                info_map.insert(f.path.clone(), recs);
-                map.insert(f.id, tag_out);
-                if idx % 5 == 4 {
-                    set_map.set(map.clone());
-                    set_file_recommended_info_map.set(info_map.clone());
-                }
-            }
-            set_map.set(map);
-            set_file_recommended_info_map.set(info_map);
-            set_show.set(true);
-            web_sys::console::log_1(&format!("[Recommend] ready with {} buttons · LLM bulk for {} files", total_buttons, max_files).into());
         });
     };
     let (scanning, set_scanning) = signal(false);
@@ -1070,7 +999,7 @@ pub fn App() -> impl IntoView {
                         set_selected_file_paths=set_selected_file_paths
                         last_selected_file_path=last_selected_file_path
                         set_last_selected_file_path=set_last_selected_file_path
-                        recommended_map=file_recommended_tags_map
+                        _recommended_map=file_recommended_tags_map
                         recommended_info_map=file_recommended_info_map
                         show_recommended=show_recommended
                         all_tags=all_tags
@@ -1097,55 +1026,57 @@ pub fn App() -> impl IntoView {
                                 let sel = selected_file_paths.clone();
                                 let set_info = set_file_recommended_info_map;
                                 let set_show = set_show_recommended;
+                                let set_run = set_batch_running;
+                                let set_prog = set_batch_progress;
+                                let set_tot = set_batch_total;
+                                let cancel_sig = batch_cancel;
                                 move |_| {
                                     let files = sel.get();
                                     if files.is_empty() { return; }
-                                    let path = files[0].clone();
-                                    let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
                                     let tags = tags_sig.get();
                                     let label_names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
                                     let tk = core::cmp::min(label_names.len(), 8);
-                                    if ["jpg","jpeg","png","webp"].contains(&ext.as_str()) {
-                                        #[derive(Serialize)]
-                                        #[serde(rename_all = "camelCase")]
-                                        struct VisionArgs { image_path: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
-                                        let args = VisionArgs { image_path: path.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.3, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/deepseek-vl2")) };
-                                        web_sys::console::log_1(&format!("[VL] request: path='{}', labels={}, tk={}", path, serde_json::to_string(&label_names).unwrap_or_default(), tk).into());
-                                        spawn_local(async move {
-                                            let val = invoke("generate_image_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                            match serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
-                                                Ok(list) => {
-                                                    web_sys::console::log_1(&format!("[VL] items=[{}]", list.iter().map(|ri| format!("{}:{:.3}:{}", ri.name, ri.score, ri.source)).collect::<Vec<_>>().join(", ")).into());
+                                    set_tot.set(files.len());
+                                    set_prog.set(0);
+                                    set_run.set(true);
+                                    set_show.set(true);
+                                    spawn_local(async move {
+                                        let mut done = 0usize;
+                                        for path in files {
+                                            if cancel_sig.get_untracked() { break; }
+                                            let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
+                                            if ["jpg","jpeg","png","webp"].contains(&ext.as_str()) {
+                                                #[derive(Serialize)]
+                                                #[serde(rename_all = "camelCase")]
+                                                struct VisionArgs { image_path: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
+                                                let args = VisionArgs { image_path: path.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.3, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/deepseek-vl2")) };
+                                                let val = invoke("generate_image_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
                                                     let mut map = file_recommended_info_map.get_untracked();
                                                     map.insert(path.clone(), list);
                                                     set_info.set(map);
-                                                    set_show.set(true);
-                                                },
-                                                Err(e) => web_sys::console::log_1(&format!("[VL] error={:?}", e).into())
+                                                }
+                                            } else {
+                                                #[derive(Serialize)]
+                                                #[serde(rename_all = "camelCase")]
+                                                struct LlmArgs { title: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
+                                                let title = std::path::Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                                                if !title.is_empty() {
+                                                    let args = LlmArgs { title: title.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/DeepSeek-V3.2-Exp")) };
+                                                    let val = invoke("generate_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
+                                                        let mut map = file_recommended_info_map.get_untracked();
+                                                        map.insert(path.clone(), list);
+                                                        set_info.set(map);
+                                                    }
+                                                }
                                             }
-                                        });
-                                    } else {
-                                        #[derive(Serialize)]
-                                        #[serde(rename_all = "camelCase")]
-                                        struct LlmArgs { title: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
-                                        let title = std::path::Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                                        if title.is_empty() { web_sys::console::log_1(&"[LLM] empty title".into()); return; }
-                                        let args = LlmArgs { title: title.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/DeepSeek-V3.2-Exp")) };
-                                        web_sys::console::log_1(&format!("[LLM] request: title='{}', labels={}, tk={}", title, serde_json::to_string(&label_names).unwrap_or_default(), tk).into());
-                                        spawn_local(async move {
-                                            let val = invoke("generate_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                            match serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
-                                                Ok(list) => {
-                                                    web_sys::console::log_1(&format!("[LLM] items=[{}]", list.iter().map(|ri| format!("{}:{:.3}:{}", ri.name, ri.score, ri.source)).collect::<Vec<_>>().join(", ")).into());
-                                                    let mut map = file_recommended_info_map.get_untracked();
-                                                    map.insert(path.clone(), list);
-                                                    set_info.set(map);
-                                                    set_show.set(true);
-                                                },
-                                                Err(e) => web_sys::console::log_1(&format!("[LLM] error={:?}", e).into())
-                                            }
-                                        });
-                                    }
+                                            done += 1;
+                                            set_prog.set(done);
+                                        }
+                                        set_run.set(false);
+                                        set_batch_cancel.set(false);
+                                    });
                                 }
                             }>"Recommend Tag"</button>
                         </div>
@@ -1298,20 +1229,20 @@ pub fn App() -> impl IntoView {
                     </div>
                 </div>
             })}
+
+            {move || batch_running.get().then(|| view! {
+                <div class="overlay-blocker" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.55);z-index:2000;display:flex;align-items:center;justify-content:center;">
+                    <div class="overlay-card">
+                        <div>{format!("Recommending... {}/{}", batch_progress.get(), batch_total.get())}</div>
+                        <div class="progress-bar"><div class="progress-fill" style=move || format!("width: {}%", if batch_total.get()>0 { batch_progress.get()*100 / batch_total.get() } else { 0 })></div></div>
+                        <div style="margin-top:12px; display:flex; gap:8px; justify-content:right;">
+                            <button on:click=move |_| set_batch_cancel.set(true) style="background:#c33; color:#fff; border:none; padding:6px 12px; border-radius:4px;">"Cancel"</button>
+                        </div>
+                    </div>
+                </div>
+            })}
         </div>
     }
-
-    {move || batch_running.get().then(|| view! {
-        <div class="overlay-blocker">
-            <div class="overlay-card">
-                <div>{format!("Recommending... {}/{}", batch_progress.get(), batch_total.get())}</div>
-                <div class="progress-bar"><div class="progress-fill" style=move || format!("width: {}%", if batch_total.get()>0 { (batch_progress.get()*100 / batch_total.get()) } else { 0 })></div></div>
-                <div style="margin-top:12px; display:flex; gap:8px; justify-content:right;">
-                    <button on:click=move |_| set_batch_cancel.set(true) style="background:#c33; color:#fff; border:none; padding:6px 12px; border-radius:4px;">"Cancel"</button>
-                </div>
-            </div>
-        </div>
-    })}
 }
 
 #[component]
@@ -1673,7 +1604,7 @@ fn GroupedFileList(
     set_selected_file_paths: WriteSignal<Vec<String>>,
     last_selected_file_path: ReadSignal<Option<String>>,
     set_last_selected_file_path: WriteSignal<Option<String>>,
-    recommended_map: ReadSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
+    _recommended_map: ReadSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
     recommended_info_map: ReadSignal<std::collections::HashMap<String, Vec<RecommendItem>>>,
     show_recommended: ReadSignal<bool>,
     all_tags: ReadSignal<Vec<TagInfo>>,
