@@ -28,4 +28,5 @@ sha2 = "0.10"
 hex = "0.4"
 notify = "7.0"
 async-openai = "0.19"
+base64 = "0.21"
  

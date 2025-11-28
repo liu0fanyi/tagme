@@ -375,6 +375,112 @@ async fn generate_tags_llm(
     Ok(filtered)
 }
 
+#[tauri::command]
+async fn generate_image_tags_llm(
+    image_path: String,
+    labels: Vec<String>,
+    top_k: usize,
+    threshold: f32,
+    base_url: Option<String>,
+    model: Option<String>,
+) -> Result<Vec<RecommendItem>, String> {
+    use async_openai::types::{
+        ChatCompletionRequestMessage,
+        CreateChatCompletionRequestArgs,
+        ChatCompletionRequestSystemMessageArgs,
+        ChatCompletionRequestUserMessageArgs,
+        ChatCompletionRequestMessageContentPart,
+        ChatCompletionRequestMessageContentPartTextArgs,
+        ChatCompletionRequestMessageContentPartImageArgs,
+        ImageUrlArgs,
+    };
+    use async_openai::Client;
+    use async_openai::config::OpenAIConfig;
+
+    let api_key = std::env::var("SILICONFLOW_API_KEY")
+        .or_else(|_| std::env::var("LLM_API_KEY"))
+        .map_err(|_| "SILICONFLOW_API_KEY/LLM_API_KEY not set".to_string())?;
+    let base = base_url.unwrap_or_else(|| std::env::var("LLM_BASE_URL").unwrap_or_else(|_| "https://api.siliconflow.cn/v1".to_string()));
+    let model_name = model.unwrap_or_else(|| std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-ai/deepseek-vl2".to_string()));
+
+    let bytes = std::fs::read(&image_path).map_err(|e| e.to_string())?;
+    let mime = {
+        let p = std::path::Path::new(&image_path);
+        match p.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).as_deref() {
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("png") => "image/png",
+            Some("webp") => "image/webp",
+            _ => "image/jpeg",
+        }
+    };
+    let data_url = {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        format!("data:{};base64,{}", mime, STANDARD.encode(&bytes))
+    };
+
+    let cfg = OpenAIConfig::new().with_api_base(base).with_api_key(api_key);
+    let client = Client::with_config(cfg);
+
+    let sys = ChatCompletionRequestMessage::System(
+        ChatCompletionRequestSystemMessageArgs::default()
+            .content("你是一个图片标签推荐助手。只从已存在的标签列表中挑选，返回 JSON 对象：{\"items\":[{\"name\":string,\"confidence\":number}]}. 不要创建新标签。")
+            .build().map_err(|e| e.to_string())?
+    );
+
+    let text_part = ChatCompletionRequestMessageContentPart::Text(
+        ChatCompletionRequestMessageContentPartTextArgs::default()
+            .text(format!("labels: {}\n最多选择 {} 个，只从 labels 中选择。", serde_json::to_string(&labels).unwrap_or_default(), top_k))
+            .build().unwrap()
+    );
+    let image_part = ChatCompletionRequestMessageContentPart::Image(
+        ChatCompletionRequestMessageContentPartImageArgs::default()
+            .image_url(
+                ImageUrlArgs::default()
+                    .url(data_url)
+                    .build().unwrap()
+            )
+            .build().unwrap()
+    );
+    let user = ChatCompletionRequestMessage::User(
+        ChatCompletionRequestUserMessageArgs::default()
+            .content(vec![text_part, image_part])
+            .build().map_err(|e| e.to_string())?
+    );
+
+    let req = CreateChatCompletionRequestArgs::default()
+        .model(model_name)
+        .messages(vec![sys, user])
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.chat().create(req).await.map_err(|e| e.to_string())?;
+    let mut out: Vec<RecommendItem> = Vec::new();
+    if let Some(choice) = resp.choices.first() {
+        if let Some(content) = &choice.message.content {
+            let raw = content.clone();
+            let v = match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(val) => val,
+                Err(_) => {
+                    let mut s = raw.replace("```json", "").replace("```", "");
+                    if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) { s = s[start..=end].to_string(); }
+                    serde_json::from_str::<serde_json::Value>(&s).unwrap_or_else(|_| serde_json::json!({"items": []}))
+                }
+            };
+            if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
+                for it in items {
+                    let name = it.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if !labels.iter().any(|l| l == &name) { continue; }
+                    let confidence = it.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+                    out.push(RecommendItem { name, score: confidence, source: "llm-vision".to_string() });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    Ok(out.into_iter().filter(|x| x.score >= threshold).take(top_k).collect())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -457,6 +563,7 @@ pub fn run() {
             filter_files_by_tags,
             recommend_tags_by_title,
             generate_tags_llm,
+            generate_image_tags_llm,
             save_window_state,
             load_window_state,
             open_file

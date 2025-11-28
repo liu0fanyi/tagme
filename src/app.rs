@@ -1031,13 +1031,47 @@ pub fn App() -> impl IntoView {
                     }
                 ></div>
 
-                <div class="right-sidebar" style=move || format!("width: {}px", right_panel_width.get())>
-                    <div class="panel-header">
-                        <h2>"File Tags"</h2>
-                        <div class="file-controls">
-                            <button on:click=recommend_selected>"AI Recommend Selected"</button>
-                        </div>
-                    </div>
+                        <div class="right-sidebar" style=move || format!("width: {}px", right_panel_width.get())>
+                            <div class="panel-header">
+                                <h2>"File Tags"</h2>
+                                <div class="file-controls">
+                                    <button on:click=recommend_selected>"AI Recommend Selected"</button>
+                                    <button on:click={
+                                        let tags_sig = all_tags.clone();
+                                        let sel = selected_file_paths.clone();
+                                        let set_info = set_file_recommended_info_map;
+                                        let set_show = set_show_recommended;
+                                        move |_| {
+                                            let files = sel.get();
+                                            if files.is_empty() { return; }
+                                            let path = files[0].clone();
+                                            let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
+                                            if !["jpg","jpeg","png","webp"].contains(&ext.as_str()) { web_sys::console::log_1(&"[VL] selected not an image".into()); return; }
+                                            let tags = tags_sig.get();
+                                            let label_names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
+                                            #[derive(Serialize)]
+                                            #[serde(rename_all = "camelCase")]
+                                            struct VisionArgs { image_path: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
+                                            let tk = core::cmp::min(label_names.len(), 8);
+                                            let args = VisionArgs { image_path: path.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: None, model: Some(String::from("deepseek-ai/deepseek-vl2")) };
+                                            web_sys::console::log_1(&format!("[VL] request: path='{}', labels={}, tk={}", path, serde_json::to_string(&label_names).unwrap_or_default(), tk).into());
+                                            spawn_local(async move {
+                                                let val = invoke("generate_image_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                match serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
+                                                    Ok(list) => {
+                                                        web_sys::console::log_1(&format!("[VL] items=[{}]", list.iter().map(|ri| format!("{}:{:.3}:{}", ri.name, ri.score, ri.source)).collect::<Vec<_>>().join(", ")).into());
+                                                        let mut map = file_recommended_info_map.get();
+                                                        map.insert(path.clone(), list);
+                                                        set_info.set(map);
+                                                        set_show.set(true);
+                                                    },
+                                                    Err(e) => web_sys::console::log_1(&format!("[VL] error={:?}", e).into())
+                                                }
+                                            });
+                                        }
+                                    }>"AI Vision Recommend Selected"</button>
+                                </div>
+                            </div>
                     {move || {
                         let files = selected_file_paths.get();
                         let is_empty = files.is_empty();
@@ -1735,7 +1769,7 @@ fn GroupedFileList(
                                                                                                 key=|ri| ri.name.clone()
                                                                                                 children=move |ri: RecommendItem| {
                                                                                                     let fp_arc_local = fp_arc_for_recs.clone();
-                                                                                                    let label = if ri.source == "onnx" { format!("{} ·AI", ri.name) } else if ri.source == "llm" { format!("{} ·LLM", ri.name) } else { ri.name.clone() };
+                                                                                                    let label = if ri.source == "onnx" { format!("{} ·AI", ri.name) } else if ri.source == "llm" { format!("{} ·LLM", ri.name) } else if ri.source == "llm-vision" { format!("{} ·VL", ri.name) } else { ri.name.clone() };
                                                                                                     let title_attr = format!("score: {:.3}", ri.score);
                                                                                                     let tname = ri.name.clone();
                                                                                                     view! {
@@ -1907,7 +1941,7 @@ fn GroupedFileList(
                                                                             key=|ri| ri.name.clone()
                                                                             children=move |ri: RecommendItem| {
                                                                                 let fp_arc_local = fp_arc_for_recs.clone();
-                                                                                let label = if ri.source == "onnx" { format!("{} ·AI", ri.name) } else if ri.source == "llm" { format!("{} ·LLM", ri.name) } else { ri.name.clone() };
+                                                                                let label = if ri.source == "onnx" { format!("{} ·AI", ri.name) } else if ri.source == "llm" { format!("{} ·LLM", ri.name) } else if ri.source == "llm-vision" { format!("{} ·VL", ri.name) } else { ri.name.clone() };
                                                                                 let title_attr = format!("score: {:.3}", ri.score);
                                                                                 let tname = ri.name.clone();
                                                                                 view! {
