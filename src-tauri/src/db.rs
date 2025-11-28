@@ -24,6 +24,7 @@ pub struct FileInfo {
     pub content_hash: String,
     pub size_bytes: u64,
     pub last_modified: i64,
+    pub is_directory: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -60,6 +61,17 @@ pub fn init_db(app_handle: &AppHandle) -> Result<()> {
 
     let conn = Connection::open(&db_path)?;
 
+    // Roots table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS roots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    // Files table (new installs include root_id)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,10 +80,18 @@ pub fn init_db(app_handle: &AppHandle) -> Result<()> {
             size_bytes INTEGER NOT NULL,
             last_modified INTEGER NOT NULL,
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            root_id INTEGER,
+            FOREIGN KEY (root_id) REFERENCES roots(id) ON DELETE CASCADE
         )",
         [],
     )?;
+
+    // Migration: add is_directory column for folder tagging
+    let _ = conn.execute(
+        "ALTER TABLE files ADD COLUMN is_directory INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tags (
@@ -172,70 +192,228 @@ pub fn init_db(app_handle: &AppHandle) -> Result<()> {
         eprintln!("🎉 默认tag创建完成！");
     }
 
+    // Ensure files.root_id column exists for old installs
+    let _ = conn.execute("ALTER TABLE files ADD COLUMN root_id INTEGER", []);
+
+    // Migrate single root_directory to root_directories list if necessary
+    let roots_json: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'root_directories'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    let has_list = roots_json
+        .as_ref()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !has_list {
+        let single_root: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'root_directory'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(r) = single_root {
+            let list_json = serde_json::to_string(&vec![r.clone()]).unwrap_or("[]".to_string());
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('root_directories', ?1)",
+                params![list_json],
+            )?;
+            // Remove legacy key
+            let _ = conn.execute(
+                "DELETE FROM settings WHERE key = 'root_directory'",
+                [],
+            );
+        }
+    }
+
+    // Sync roots table with root_directories setting
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let roots = get_root_directories(app_handle).unwrap_or_default();
+    for rp in &roots {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO roots (path, created_at) VALUES (?1, ?2)",
+            params![rp, now],
+        );
+    }
+    // Remove stale roots not in settings
+    let mut stmt = conn.prepare("SELECT path FROM roots")?;
+    let existing: Vec<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for ep in existing {
+        if !roots.iter().any(|r| r == &ep) {
+            let _ = conn.execute("DELETE FROM roots WHERE path = ?1", params![ep]);
+        }
+    }
+
+    // Populate files.root_id by matching longest root path prefix
+    let mut roots_stmt = conn.prepare("SELECT id, path FROM roots")?;
+    let roots_rows = roots_stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+    let mut roots_list: Vec<(i64, String)> = Vec::new();
+    for r in roots_rows { if let Ok(pair) = r { roots_list.push(pair); } }
+    // For each root, assign files whose path starts with root
+    for (rid, rpath) in &roots_list {
+        let like = format!("{}%", rpath);
+        let _ = conn.execute(
+            "UPDATE files SET root_id = ?1 WHERE path LIKE ?2",
+            params![rid, like],
+        );
+    }
+
     Ok(())
 }
 
 // Settings functions
 pub fn set_root_directory(app_handle: &AppHandle, path: String) -> Result<()> {
+    // Backward compatibility: store single root in settings and ensure roots table
     let conn = Connection::open(get_db_path(app_handle))?;
-    conn.execute(
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let _ = conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('root_directory', ?1)",
-        params![path],
-    )?;
+        params![path.clone()],
+    );
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO roots (path, created_at) VALUES (?1, ?2)",
+        params![path, now],
+    );
     Ok(())
 }
 
 pub fn get_root_directory(app_handle: &AppHandle) -> Result<Option<String>> {
+    // Return first root if exists
     let conn = Connection::open(get_db_path(app_handle))?;
-    let result = conn.query_row(
-        "SELECT value FROM settings WHERE key = 'root_directory'",
-        [],
-        |row| row.get(0),
-    );
-    match result {
-        Ok(path) => Ok(Some(path)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e),
+    let mut stmt = conn.prepare("SELECT path FROM roots ORDER BY id LIMIT 1")?;
+    let mut rows = stmt.query([])?;
+    if let Some(row) = rows.next()? {
+        let p: String = row.get(0)?;
+        Ok(Some(p))
+    } else {
+        Ok(None)
     }
 }
 
 pub fn set_root_directories(app_handle: &AppHandle, paths: Vec<String>) -> Result<()> {
     let conn = Connection::open(get_db_path(app_handle))?;
+    // Sync settings for compatibility
     let value = serde_json::to_string(&paths).unwrap_or("[]".to_string());
-    conn.execute(
+    let _ = conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('root_directories', ?1)",
         params![value],
-    )?;
+    );
+    // Sync roots table
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
+    for p in &paths {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO roots (path, created_at) VALUES (?1, ?2)",
+            params![p, now],
+        );
+    }
+    // Remove roots not in provided list
+    let mut stmt = conn.prepare("SELECT path FROM roots")?;
+    let existing: Vec<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for ep in existing {
+        if !paths.iter().any(|r| r == &ep) {
+            let _ = conn.execute("DELETE FROM roots WHERE path = ?1", params![ep]);
+        }
+    }
     Ok(())
 }
 
 pub fn get_root_directories(app_handle: &AppHandle) -> Result<Vec<String>> {
     let conn = Connection::open(get_db_path(app_handle))?;
-    let result: Result<String, _> = conn.query_row(
-        "SELECT value FROM settings WHERE key = 'root_directories'",
-        [],
-        |row| row.get(0),
-    );
-    match result {
-        Ok(json) => serde_json::from_str::<Vec<String>>(&json)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Vec::new()),
-        Err(e) => Err(e),
-    }
+    let mut stmt = conn.prepare("SELECT path FROM roots ORDER BY path")?;
+    let paths = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(paths)
 }
 
 pub fn add_root_directory(app_handle: &AppHandle, path: String) -> Result<()> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
+    conn.execute(
+        "INSERT OR IGNORE INTO roots (path, created_at) VALUES (?1, ?2)",
+        params![path.clone(), now],
+    )?;
+    // Also sync settings list
     let mut list = get_root_directories(app_handle)?;
-    if !list.iter().any(|p| p == &path) {
-        list.push(path);
-    }
-    set_root_directories(app_handle, list)
+    if !list.iter().any(|p| p == &path) { list.push(path.clone()); }
+    set_root_directories(app_handle, list)?;
+    // Assign root_id for existing files under this root
+    let rid: i64 = conn.query_row(
+        "SELECT id FROM roots WHERE path = ?1",
+        params![path.clone()],
+        |row| row.get(0),
+    )?;
+    let like = format!("{}%", path);
+    let _ = conn.execute("UPDATE files SET root_id = ?1 WHERE path LIKE ?2", params![rid, like]);
+    Ok(())
 }
 
 pub fn remove_root_directory(app_handle: &AppHandle, path: String) -> Result<()> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    conn.execute("DELETE FROM roots WHERE path = ?1", params![path.clone()])?;
+    // Also sync settings list
     let mut list = get_root_directories(app_handle)?;
     list.retain(|p| p != &path);
     set_root_directories(app_handle, list)
+}
+
+pub fn delete_files_under_root(app_handle: &AppHandle, root_path: String) -> Result<usize> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    // Prefer root_id-based deletion
+    let rid_opt: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM roots WHERE path = ?1",
+            params![root_path.clone()],
+            |row| row.get(0),
+        )
+        .ok();
+    let affected = if let Some(rid) = rid_opt {
+        conn.execute("DELETE FROM files WHERE root_id = ?1", params![rid])?
+    } else {
+        let pattern = format!("{}%", root_path);
+        conn.execute("DELETE FROM files WHERE path LIKE ?1", params![pattern])?
+    };
+    Ok(affected as usize)
+}
+
+pub fn purge_all_files(app_handle: &AppHandle) -> Result<usize> {
+    let db_path = get_db_path(app_handle);
+    eprintln!("[DB] purge_all_files using path: {}", db_path.to_string_lossy());
+    let conn = Connection::open(&db_path)?;
+    let mut count_before: i64 = 0;
+    if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM files") {
+        count_before = stmt.query_row([], |row| row.get(0)).unwrap_or(0);
+    }
+    eprintln!("[DB] files count before delete: {}", count_before);
+    let affected = conn.execute("DELETE FROM files", [])?;
+    let mut count_after: i64 = 0;
+    if let Ok(mut stmt) = conn.prepare("SELECT COUNT(*) FROM files") {
+        count_after = stmt.query_row([], |row| row.get(0)).unwrap_or(0);
+    }
+    eprintln!("[DB] files count after delete: {} (affected={})", count_after, affected);
+    Ok(affected as usize)
+}
+
+pub fn get_db_path_string(app_handle: &AppHandle) -> String {
+    get_db_path(app_handle).to_string_lossy().to_string()
+}
+
+pub fn get_files_count(app_handle: &AppHandle) -> Result<u32> {
+    let conn = Connection::open(get_db_path(app_handle))?;
+    let cnt: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
+    Ok(cnt as u32)
 }
 
 // File hashing function
@@ -372,7 +550,8 @@ pub fn hash_and_insert_file(app_handle: &AppHandle, path: String) -> Result<u32>
     // Get file metadata
     let metadata = fs::metadata(&path_obj)
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    let size_bytes = metadata.len();
+    let is_dir = metadata.is_dir();
+    let size_bytes = if is_dir { 0 } else { metadata.len() };
     let last_modified = metadata
         .modified()
         .ok()
@@ -389,6 +568,15 @@ pub fn hash_and_insert_file(app_handle: &AppHandle, path: String) -> Result<u32>
         )
         .ok();
 
+    // Find matching root id by longest prefix
+    let rid_opt: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM roots WHERE ?1 LIKE (path || '%') ORDER BY LENGTH(path) DESC LIMIT 1",
+            params![path.clone()],
+            |row| row.get(0),
+        )
+        .ok();
+
     let file_id = if let Some((id, _old_hash, old_size, old_mtime)) = existing {
         eprintln!("📄 File exists in DB (id: {})", id);
         
@@ -399,12 +587,22 @@ pub fn hash_and_insert_file(app_handle: &AppHandle, path: String) -> Result<u32>
         } else {
             // Metadata changed, need to re-hash
             eprintln!("   └─ Metadata changed, re-hashing...");
-            let new_hash = hash_file_content(&path_obj)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            let new_hash = if is_dir {
+                // Pseudo-hash for directories based on path + mtime + entries count
+                let mut hasher = Sha256::new();
+                let entries_count: u64 = fs::read_dir(&path_obj).ok().map(|it| it.count() as u64).unwrap_or(0);
+                hasher.update(path.as_bytes());
+                hasher.update(last_modified.to_le_bytes());
+                hasher.update(entries_count.to_le_bytes());
+                format!("dir:{:x}", hasher.finalize())
+            } else {
+                hash_file_content(&path_obj)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+            };
             
             conn.execute(
-                "UPDATE files SET content_hash = ?1, size_bytes = ?2, last_modified = ?3, updated_at = ?4 WHERE id = ?5",
-                params![new_hash, size_bytes as i64, last_modified, now, id],
+                "UPDATE files SET content_hash = ?1, size_bytes = ?2, last_modified = ?3, updated_at = ?4, root_id = ?5, is_directory = ?6 WHERE id = ?7",
+                params![new_hash, size_bytes as i64, last_modified, now, rid_opt, if is_dir { 1 } else { 0 }, id],
             )?;
             eprintln!("   └─ ✅ Updated in DB");
             id
@@ -412,13 +610,22 @@ pub fn hash_and_insert_file(app_handle: &AppHandle, path: String) -> Result<u32>
     } else {
         // New file - must hash and insert
         eprintln!("📄 New file, hashing and inserting: {}", path);
-        let content_hash = hash_file_content(&path_obj)
-            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let content_hash = if is_dir {
+            let mut hasher = Sha256::new();
+            let entries_count: u64 = fs::read_dir(&path_obj).ok().map(|it| it.count() as u64).unwrap_or(0);
+            hasher.update(path.as_bytes());
+            hasher.update(last_modified.to_le_bytes());
+            hasher.update(entries_count.to_le_bytes());
+            format!("dir:{:x}", hasher.finalize())
+        } else {
+            hash_file_content(&path_obj)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+        };
         
         conn.execute(
-            "INSERT INTO files (path, content_hash, size_bytes, last_modified, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![path, content_hash, size_bytes as i64, last_modified, now, now],
+            "INSERT INTO files (path, content_hash, size_bytes, last_modified, created_at, updated_at, root_id, is_directory)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![path, content_hash, size_bytes as i64, last_modified, now, now, rid_opt, if is_dir { 1 } else { 0 }],
         )?;
         let new_id = conn.last_insert_rowid() as u32;
         eprintln!("   └─ ✅ Inserted with id: {}", new_id);
@@ -433,7 +640,7 @@ pub fn hash_and_insert_file(app_handle: &AppHandle, path: String) -> Result<u32>
 pub fn get_all_files(app_handle: &AppHandle) -> Result<Vec<FileInfo>> {
     let conn = Connection::open(get_db_path(app_handle))?;
     let mut stmt = conn.prepare(
-        "SELECT id, path, content_hash, size_bytes, last_modified FROM files ORDER BY path",
+        "SELECT id, path, content_hash, size_bytes, last_modified, is_directory FROM files ORDER BY path",
     )?;
 
     let files = stmt
@@ -444,6 +651,7 @@ pub fn get_all_files(app_handle: &AppHandle) -> Result<Vec<FileInfo>> {
                 content_hash: row.get(2)?,
                 size_bytes: row.get::<_, i64>(3)? as u64,
                 last_modified: row.get(4)?,
+                is_directory: row.get::<_, i64>(5)? != 0,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -617,7 +825,6 @@ pub fn move_tag(
 // File-tag relationship operations
 // Now accepts file_path instead of file_id - will hash and insert file if needed
 pub fn add_file_tag(app_handle: &AppHandle, file_path: String, tag_id: u32) -> Result<()> {
-    // First, ensure file is in database (hash if needed)
     let file_id = hash_and_insert_file(app_handle, file_path)?;
     
     // Now add the tag relationship
@@ -684,7 +891,7 @@ pub fn get_files_by_tags(
     let query = if use_and_logic {
         // AND logic: files must have ALL selected tags
         format!(
-            "SELECT DISTINCT f.id, f.path, f.content_hash, f.size_bytes, f.last_modified
+            "SELECT DISTINCT f.id, f.path, f.content_hash, f.size_bytes, f.last_modified, f.is_directory
              FROM files f
              WHERE (SELECT COUNT(DISTINCT ft.tag_id) 
                     FROM file_tags ft 
@@ -696,7 +903,7 @@ pub fn get_files_by_tags(
     } else {
         // OR logic: files must have ANY selected tag
         format!(
-            "SELECT DISTINCT f.id, f.path, f.content_hash, f.size_bytes, f.last_modified
+            "SELECT DISTINCT f.id, f.path, f.content_hash, f.size_bytes, f.last_modified, f.is_directory
              FROM files f
              JOIN file_tags ft ON f.id = ft.file_id
              WHERE ft.tag_id IN ({})
@@ -716,6 +923,7 @@ pub fn get_files_by_tags(
                 content_hash: row.get(2)?,
                 size_bytes: row.get::<_, i64>(3)? as u64,
                 last_modified: row.get(4)?,
+                is_directory: row.get::<_, i64>(5)? != 0,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

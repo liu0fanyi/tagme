@@ -27,6 +27,7 @@ struct FileInfo {
     content_hash: String,
     size_bytes: u64,
     last_modified: i64,
+    is_directory: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -252,7 +253,7 @@ pub fn App() -> impl IntoView {
                     #[derive(Serialize)]
                     #[serde(rename_all = "camelCase")]
                     struct VisionArgs { image_path: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
-                    let args = VisionArgs { image_path: path.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.3, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/deepseek-vl2")) };
+                    let args = VisionArgs { image_path: path.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/deepseek-vl2")) };
                     let val = invoke("generate_image_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
                     if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) { info_map.insert(path.clone(), list.clone()); let mut out: Vec<TagInfo> = Vec::new(); for item in list { if let Some(t) = tags.iter().find(|x| x.name == item.name) { out.push(t.clone()); } } tag_map.insert(f.id, out); }
                 } else {
@@ -280,6 +281,7 @@ pub fn App() -> impl IntoView {
     let (new_tag_name, set_new_tag_name) = signal(String::new());
     let (new_tag_parent, set_new_tag_parent) = signal(None::<u32>);
     let (new_tag_input_sidebar, set_new_tag_input_sidebar) = signal(String::new());
+    let (show_purge_confirm, set_show_purge_confirm) = signal(false);
     
     // Sorting state
     let (sort_column, set_sort_column) = signal(SortColumn::Name);
@@ -316,7 +318,7 @@ pub fn App() -> impl IntoView {
                 last_modified: file.last_modified,
                 db_id: Some(file.id),
                 tags: tags_map.get(&file.id).cloned().unwrap_or_default(),
-                is_directory: false, // DB files are always regular files
+                is_directory: file.is_directory,
             });
         }
 
@@ -630,8 +632,12 @@ pub fn App() -> impl IntoView {
     let select_directory = move |_| {
         spawn_local(async move {
             let path_val = invoke("select_root_directory", JsValue::NULL).await;
-            
-            if let Ok(path) = serde_wasm_bindgen::from_value::<String>(path_val) {
+            if let Ok(opt_path) = serde_wasm_bindgen::from_value::<Option<String>>(path_val) {
+                if opt_path.is_none() {
+                    web_sys::console::log_1(&"[Root] selection canceled".into());
+                    return;
+                }
+                let path = opt_path.unwrap();
                 let mut list = root_directories.get_untracked();
                 if !list.iter().any(|p| p == &path) { list.push(path.clone()); }
                 set_root_directories.set(list.clone());
@@ -896,6 +902,32 @@ pub fn App() -> impl IntoView {
                                                 #[serde(rename_all = "camelCase")]
                                                 struct RemoveRootArgs { path: String }
                                                 let _ = invoke("remove_root_directory", serde_wasm_bindgen::to_value(&RemoveRootArgs { path: rp2.clone() }).unwrap()).await;
+                                                let do_purge = web_sys::window().and_then(|w| w.confirm_with_message(&format!("Also purge DB records under root?\n{}", rp2)).ok()).unwrap_or(false);
+                                                if do_purge {
+                                                    #[derive(Serialize)]
+                                                    #[serde(rename_all = "camelCase")]
+                                                    struct PurgeArgs { path: String }
+                                                    let res = invoke("purge_files_under_root", serde_wasm_bindgen::to_value(&PurgeArgs { path: rp2.clone() }).unwrap()).await;
+                                                    if let Ok(cnt) = serde_wasm_bindgen::from_value::<u32>(res) {
+                                                        web_sys::console::log_1(&format!("[DB] purged {} files under root", cnt).into());
+                                                    }
+                                                }
+                                                // Reload roots from backend to ensure persistence, then restart watcher and refresh files
+                                                let roots_val = invoke("get_root_directories", JsValue::NULL).await;
+                                                if let Ok(roots) = serde_wasm_bindgen::from_value::<Vec<String>>(roots_val) {
+                                                    set_root_directories.set(roots.clone());
+                                                    // Clear active filter if it pointed to removed path
+                                                    if active_root_filter.get_untracked().as_ref() == Some(&rp2) {
+                                                        set_active_root_filter.set(None);
+                                                    }
+                                                    // Restart watcher
+                                                    #[derive(Serialize)]
+                                                    #[serde(rename_all = "camelCase")]
+                                                    struct StartWatchingMultiArgs { root_paths: Vec<String> }
+                                                    let _ = invoke("start_watching_multi", serde_wasm_bindgen::to_value(&StartWatchingMultiArgs { root_paths: roots.clone() }).unwrap()).await;
+                                                    // Refresh DB files and displayed files
+                                                    load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
+                                                }
                                             });
                                             set_root_directories.update(|v| v.retain(|x| x != &remove_val));
                                             let updated = root_directories.get_untracked();
@@ -936,6 +968,15 @@ pub fn App() -> impl IntoView {
                 }}
                 <button on:click=scan_directory disabled=move || root_directories.get().is_empty()>
                     {move || if scanning.get() { "Scanning..." } else { "Scan Files" }}
+                </button>
+                <button on:mousedown={move |_| {
+                        web_sys::console::log_1(&"[UI] Clear DB Files mousedown".into());
+                    }}
+                    on:click={move |_| {
+                        set_show_purge_confirm.set(true);
+                    }}
+                >
+                    "Clear DB Files"
                 </button>
             </div>
 
@@ -1049,9 +1090,10 @@ pub fn App() -> impl IntoView {
                                                 #[derive(Serialize)]
                                                 #[serde(rename_all = "camelCase")]
                                                 struct VisionArgs { image_path: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
-                                                let args = VisionArgs { image_path: path.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.3, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/deepseek-vl2")) };
+                                                let args = VisionArgs { image_path: path.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/deepseek-vl2")) };
                                                 let val = invoke("generate_image_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
                                                 if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
+                                                    web_sys::console::log_1(&format!("[VL] items=[{}]", list.iter().map(|ri| format!("{}:{:.3}:{}", ri.name, ri.score, ri.source)).collect::<Vec<_>>().join(", ")).into());
                                                     let mut map = file_recommended_info_map.get_untracked();
                                                     map.insert(path.clone(), list);
                                                     set_info.set(map);
@@ -1065,6 +1107,7 @@ pub fn App() -> impl IntoView {
                                                     let args = LlmArgs { title: title.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/DeepSeek-V3.2-Exp")) };
                                                     let val = invoke("generate_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
                                                     if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
+                                                        web_sys::console::log_1(&format!("[LLM] items=[{}]", list.iter().map(|ri| format!("{}:{:.3}:{}", ri.name, ri.score, ri.source)).collect::<Vec<_>>().join(", ")).into());
                                                         let mut map = file_recommended_info_map.get_untracked();
                                                         map.insert(path.clone(), list);
                                                         set_info.set(map);
@@ -1173,7 +1216,7 @@ pub fn App() -> impl IntoView {
                                                                 let ps = selected_file_paths.get();
                                                                 
                                                                 if checked {
-                                                                    // Add tag to all selected files
+                                                                    // Add tag to all selected file paths (DB entry will be created if missing)
                                                                     for p in &ps {
                                                                         let pc = p.clone();
                                                                         spawn_local(async move {
@@ -1182,7 +1225,7 @@ pub fn App() -> impl IntoView {
                                                                         });
                                                                     }
                                                                 } else {
-                                                                    // Remove tag from all selected files
+                                                                    // Remove tag only from files present in DB
                                                                     let all_files_info = all_files.get();
                                                                     for p in &ps {
                                                                         if let Some(file_info) = all_files_info.iter().find(|f| &f.path == p) {
@@ -1216,7 +1259,7 @@ pub fn App() -> impl IntoView {
 
             {move || show_add_tag_dialog.get().then(|| view! {
                 <div class="modal-overlay" on:click=move |_| set_show_add_tag_dialog.set(false)>
-                    <div class="modal" on:click=|e| e.stop_propagation()>
+                    <div class="modal" on:click={|e| e.stop_propagation()}>
                         <h3>"Add New Tag"</h3>
                         <input
                             type="text"
@@ -1226,6 +1269,47 @@ pub fn App() -> impl IntoView {
                         />
                         <button on:click=create_tag_action>"Create"</button>
                         <button on:click=move |_| set_show_add_tag_dialog.set(false)>"Cancel"</button>
+                    </div>
+                </div>
+            })}
+
+            {move || show_purge_confirm.get().then(|| view! {
+                <div class="modal-overlay" on:click=move |_| set_show_purge_confirm.set(false)>
+                    <div class="modal" on:click={|e| e.stop_propagation()}>
+                        <h3>"Confirm Purge"</h3>
+                        <p>"Purge ALL files in database? This cannot be undone."</p>
+                        <div style="display:flex; gap:8px;">
+                            <button on:click={
+                                let set_all = set_all_files;
+                                let set_disp = set_displayed_files;
+                                let set_tags_map = set_file_tags_map;
+                                let set_modal = set_show_purge_confirm;
+                                move |_| {
+                                    spawn_local(async move {
+                                        let dbp = invoke("get_db_path", JsValue::NULL).await;
+                                        if let Ok(p) = serde_wasm_bindgen::from_value::<String>(dbp.clone()) {
+                                            web_sys::console::log_1(&format!("[UI] DB path={}", p).into());
+                                        }
+                                        let before = invoke("get_files_count", JsValue::NULL).await;
+                                        if let Ok(cnt) = serde_wasm_bindgen::from_value::<u32>(before.clone()) {
+                                            web_sys::console::log_1(&format!("[UI] files count before purge={}", cnt).into());
+                                        }
+                                        let res = invoke("purge_all_files", JsValue::NULL).await;
+                                        match serde_wasm_bindgen::from_value::<u32>(res.clone()) {
+                                            Ok(cnt) => web_sys::console::log_1(&format!("[UI] purge_all_files ok, count={}", cnt).into()),
+                                            Err(e) => web_sys::console::error_1(&format!("[UI] purge_all_files parse error: {:?}; raw={:?}", e, res).into()),
+                                        }
+                                        let after = invoke("get_files_count", JsValue::NULL).await;
+                                        if let Ok(cnt) = serde_wasm_bindgen::from_value::<u32>(after.clone()) {
+                                            web_sys::console::log_1(&format!("[UI] files count after purge={}", cnt).into());
+                                        }
+                                        load_all_files(set_all, set_disp, set_tags_map).await;
+                                        set_modal.set(false);
+                                    });
+                                }
+                            }>"Confirm"</button>
+                            <button on:click=move |_| set_show_purge_confirm.set(false)>"Cancel"</button>
+                        </div>
                     </div>
                 </div>
             })}

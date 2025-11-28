@@ -47,7 +47,7 @@ fn toggle_maximize(window: tauri::Window) {
 
 // Root directory commands
 #[tauri::command]
-async fn select_root_directory(app_handle: tauri::AppHandle) -> Result<String, String> {
+async fn select_root_directory(app_handle: tauri::AppHandle) -> Result<Option<String>, String> {
     let dialog = app_handle.dialog().file();
 
     if let Some(file_path) = dialog.blocking_pick_folder() {
@@ -55,12 +55,12 @@ async fn select_root_directory(app_handle: tauri::AppHandle) -> Result<String, S
             if let Some(path_str) = path.to_str() {
                 db::add_root_directory(&app_handle, path_str.to_string())
                     .map_err(|e| e.to_string())?;
-                return Ok(path_str.to_string());
+                return Ok(Some(path_str.to_string()));
             }
         }
         Err("Invalid path encoding".to_string())
     } else {
-        Err("No folder selected".to_string())
+        Ok(None)
     }
 }
 
@@ -77,6 +77,39 @@ fn get_root_directories(app_handle: tauri::AppHandle) -> Result<Vec<String>, Str
 #[tauri::command]
 fn remove_root_directory(app_handle: tauri::AppHandle, path: String) -> Result<(), String> {
     db::remove_root_directory(&app_handle, path).map_err(|e| e.to_string())
+}
+
+
+#[tauri::command]
+fn purge_files_under_root(app_handle: tauri::AppHandle, path: String) -> Result<u32, String> {
+    db::delete_files_under_root(&app_handle, path)
+        .map(|n| n as u32)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn purge_all_files(app_handle: tauri::AppHandle) -> Result<u32, String> {
+    eprintln!("[TAURI] purge_all_files called");
+    match db::purge_all_files(&app_handle) {
+        Ok(n) => {
+            eprintln!("[TAURI] purge_all_files deleted {} rows", n);
+            Ok(n as u32)
+        }
+        Err(e) => {
+            eprintln!("[TAURI] purge_all_files error: {}", e);
+            Err(e.to_string())
+        }
+    }
+}
+
+#[tauri::command]
+fn get_db_path(app_handle: tauri::AppHandle) -> String {
+    db::get_db_path_string(&app_handle)
+}
+
+#[tauri::command]
+fn get_files_count(app_handle: tauri::AppHandle) -> Result<u32, String> {
+    db::get_files_count(&app_handle).map_err(|e| e.to_string())
 }
 
 // File scanning commands
@@ -721,6 +754,10 @@ pub fn run() {
             get_root_directory,
             get_root_directories,
             remove_root_directory,
+            purge_files_under_root,
+            purge_all_files,
+            get_db_path,
+            get_files_count,
             scan_files,
             scan_files_multi,
             start_watching,
