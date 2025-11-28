@@ -310,9 +310,9 @@ async fn generate_tags_llm(
     use async_openai::Client;
     use async_openai::config::OpenAIConfig;
 
-    let api_key = std::env::var("LLM_API_KEY").or_else(|_| std::env::var("DEEPSEEK_API_KEY")).map_err(|_| "LLM_API_KEY/DEEPSEEK_API_KEY not set".to_string())?;
-    let base = base_url.unwrap_or_else(|| std::env::var("LLM_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string()));
-    let model_name = model.unwrap_or_else(|| std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string()));
+    let api_key = std::env::var("SILICONFLOW_API_KEY").map_err(|_| "SILICONFLOW_API_KEY not set".to_string())?;
+    let base = base_url.unwrap_or_else(|| std::env::var("LLM_BASE_URL").unwrap_or_else(|_| "https://api.siliconflow.cn/v1".to_string()));
+    let model_name = model.unwrap_or_else(|| std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-ai/DeepSeek-V3.2-Exp".to_string()));
 
     let cfg = OpenAIConfig::new().with_api_base(base).with_api_key(api_key);
     let client = Client::with_config(cfg);
@@ -397,9 +397,7 @@ async fn generate_image_tags_llm(
     use async_openai::Client;
     use async_openai::config::OpenAIConfig;
 
-    let api_key = std::env::var("SILICONFLOW_API_KEY")
-        .or_else(|_| std::env::var("LLM_API_KEY"))
-        .map_err(|_| "SILICONFLOW_API_KEY/LLM_API_KEY not set".to_string())?;
+    let api_key = std::env::var("SILICONFLOW_API_KEY").map_err(|_| "SILICONFLOW_API_KEY not set".to_string())?;
     let base = base_url.unwrap_or_else(|| std::env::var("LLM_BASE_URL").unwrap_or_else(|_| "https://api.siliconflow.cn/v1".to_string()));
     let model_name = model.unwrap_or_else(|| std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-ai/deepseek-vl2".to_string()));
 
@@ -424,7 +422,7 @@ async fn generate_image_tags_llm(
 
     let sys = ChatCompletionRequestMessage::System(
         ChatCompletionRequestSystemMessageArgs::default()
-            .content("你是一个图片标签推荐助手。只从已存在的标签列表中挑选，返回 JSON 对象：{\"items\":[{\"name\":string,\"confidence\":number}]}. 不要创建新标签。")
+            .content("你是一个图片标签推荐助手。只从已存在的标签列表中挑选，尽可能返回多个（最多 top_k），并给出置信度。严格输出 JSON：{\"items\":[{\"name\":string,\"confidence\":number}]}. 不要创建新标签、不要包含除 JSON 外的任何文本。")
             .build().map_err(|e| e.to_string())?
     );
 
@@ -468,9 +466,11 @@ async fn generate_image_tags_llm(
                 }
             };
             if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
+                let mut allowed = std::collections::HashSet::new();
+                for l in &labels { allowed.insert(l.to_lowercase()); }
                 for it in items {
-                    let name = it.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    if !labels.iter().any(|l| l == &name) { continue; }
+                    let name = it.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                    if !allowed.contains(&name.to_lowercase()) { continue; }
                     let confidence = it.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
                     out.push(RecommendItem { name, score: confidence, source: "llm-vision".to_string() });
                 }
