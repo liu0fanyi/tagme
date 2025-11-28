@@ -292,13 +292,95 @@ fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct RecommendItem { name: String, score: f32, source: String }
+
+
+#[tauri::command]
+async fn generate_tags_llm(
+    title: String,
+    labels: Vec<String>,
+    top_k: usize,
+    threshold: f32,
+    base_url: Option<String>,
+    model: Option<String>,
+) -> Result<Vec<RecommendItem>, String> {
+    use async_openai::types::{ChatCompletionRequestMessage, CreateChatCompletionRequestArgs, ChatCompletionResponseFormat};
+    use async_openai::types::{ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs};
+    use async_openai::Client;
+    use async_openai::config::OpenAIConfig;
+
+    let api_key = std::env::var("LLM_API_KEY").or_else(|_| std::env::var("DEEPSEEK_API_KEY")).map_err(|_| "LLM_API_KEY/DEEPSEEK_API_KEY not set".to_string())?;
+    let base = base_url.unwrap_or_else(|| std::env::var("LLM_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string()));
+    let model_name = model.unwrap_or_else(|| std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string()));
+
+    let cfg = OpenAIConfig::new().with_api_base(base).with_api_key(api_key);
+    let client = Client::with_config(cfg);
+
+    // System instructions
+    let sys = ChatCompletionRequestMessage::System(
+        ChatCompletionRequestSystemMessageArgs::default()
+            .content("你是一个标签推荐助手。只从已存在的标签列表中挑选，返回 JSON 对象：{\"items\":[{\"name\":string,\"confidence\":number,\"rationale\":string}]}. 不要创建新标签。")
+            .build().map_err(|e| e.to_string())?
+    );
+    let user_content = format!("title: {}\nlabels: {}\n要求：只从 labels 中选择，最多 {} 个。", title, serde_json::to_string(&labels).unwrap_or_default(), top_k);
+    let user = ChatCompletionRequestMessage::User(
+        ChatCompletionRequestUserMessageArgs::default()
+            .content(user_content)
+            .build().map_err(|e| e.to_string())?
+    );
+    let req = CreateChatCompletionRequestArgs::default()
+        .model(model_name)
+        .messages(vec![sys, user])
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.chat().create(req).await.map_err(|e| e.to_string())?;
+    let mut out: Vec<RecommendItem> = Vec::new();
+    if let Some(choice) = resp.choices.first() {
+        if let Some(content) = &choice.message.content {
+            // Try direct JSON parse; if it fails, attempt to extract JSON object from fenced code or plain text
+            let raw = content.clone();
+            let try_parse = |s: &str| -> Result<serde_json::Value, String> {
+                serde_json::from_str::<serde_json::Value>(s).map_err(|e| e.to_string())
+            };
+            let v = match try_parse(&raw) {
+                Ok(val) => val,
+                Err(_) => {
+                    // Strip code fences ```json ... ``` or ``` ... ```
+                    let mut s = raw.replace("```json", "").replace("```", "");
+                    // Trim leading non-json noise
+                    if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
+                        s = s[start..=end].to_string();
+                    }
+                    match try_parse(&s) {
+                        Ok(val2) => val2,
+                        Err(_) => serde_json::json!({"items": []})
+                    }
+                }
+            };
+            if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
+                for it in items {
+                    let name = it.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if !labels.iter().any(|l| l == &name) { continue; }
+                    let confidence = it.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+                    out.push(RecommendItem { name, score: confidence, source: "llm".to_string() });
+                }
+            }
+        }
+    }
+    // Top-k & threshold filter
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let filtered: Vec<RecommendItem> = out.into_iter().filter(|x| x.score >= threshold).take(top_k).collect();
+    Ok(filtered)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let _ = app.get_webview_window("main").expect("no main window").set_focus();
         }))
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) = event {
@@ -374,6 +456,7 @@ pub fn run() {
             get_file_tags,
             filter_files_by_tags,
             recommend_tags_by_title,
+            generate_tags_llm,
             save_window_state,
             load_window_state,
             open_file

@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use serde::{Deserialize, Serialize}; 
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -193,41 +193,101 @@ pub fn App() -> impl IntoView {
     let (selected_file_paths, set_selected_file_paths) = signal(Vec::<String>::new());
     let (last_selected_file_path, set_last_selected_file_path) = signal(None::<String>);
     let (file_recommended_tags_map, set_file_recommended_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
+    let (file_recommended_info_map, set_file_recommended_info_map) = signal(std::collections::HashMap::<String, Vec<RecommendItem>>::new());
     let (show_recommended, set_show_recommended) = signal(false);
+    let recommend_selected = move |_| {
+        let tags = all_tags.get();
+        let selected = selected_file_paths.get();
+        if selected.is_empty() { return; }
+        let path = selected[0].clone();
+        web_sys::console::log_1(&format!("[LLM] selected path={}", path).into());
+        let set_info = set_file_recommended_info_map;
+        let current_map = file_recommended_info_map.get();
+        let set_show = set_show_recommended;
+        spawn_local(async move {
+            let title = std::path::Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            if title.is_empty() { web_sys::console::log_1(&"[LLM] empty title".into()); return; }
+            let label_names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
+            #[derive(Serialize)]
+            #[serde(rename_all = "camelCase")]
+            struct LlmArgs { title: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
+            let tk = core::cmp::min(label_names.len(), 8);
+            let args = LlmArgs { title: title.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: None, model: None };
+            web_sys::console::log_1(&format!("[LLM] request: title='{}', labels={}, tk={}", title, serde_json::to_string(&label_names).unwrap_or_default(), tk).into());
+            let val = invoke("generate_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+            match serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
+                Ok(list) => {
+                    web_sys::console::log_1(&format!("[LLM] items=[{}]", list.iter().map(|ri| format!("{}:{:.3}:{}", ri.name, ri.score, ri.source)).collect::<Vec<_>>().join(", ")).into());
+                    let mut map = current_map.clone();
+                    map.insert(path.clone(), list);
+                    set_info.set(map);
+                    set_show.set(true);
+                },
+                Err(e) => {
+                    web_sys::console::log_1(&format!("[LLM] error={:?}", e).into());
+                }
+            }
+        });
+    };
     let compute_title_recommendations = move |_| {
-        web_sys::console::log_1(&"[Recommend] computing title-based tags".into());
+        web_sys::console::log_1(&"[Recommend] computing title-based tags (LLM bulk, throttled)".into());
         let files = displayed_files.get();
         let tags = all_tags.get();
-        let mut map = std::collections::HashMap::new();
-        let mut total_buttons = 0usize;
-        for f in &files {
-            let path_obj = std::path::Path::new(&f.path);
-            let name = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-            if name.is_empty() { continue; }
-            let tokens: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).collect();
-            let mut scored: Vec<(TagInfo, i32)> = Vec::new();
-            for t in &tags {
-                let tname = t.name.to_lowercase();
-                let mut score = 0;
-                if !tname.is_empty() {
-                    if name.contains(&tname) { score += 10; }
-                    if tokens.iter().any(|w| *w == tname) { score += 8; }
-                    if name.starts_with(&tname) || name.ends_with(&tname) { score += 4; }
+        let set_map = set_file_recommended_tags_map;
+        let set_show = set_show_recommended;
+        let max_files = core::cmp::min(files.len(), 20);
+        spawn_local(async move {
+            let mut map = std::collections::HashMap::new();
+            let mut info_map = std::collections::HashMap::new();
+            let mut total_buttons = 0usize;
+            for (idx, f) in files.iter().take(max_files).enumerate() {
+                let path_obj = std::path::Path::new(&f.path);
+                let title = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                if title.is_empty() { continue; }
+                let label_names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
+                #[derive(Serialize)]
+                #[serde(rename_all = "camelCase")]
+                struct LlmArgs { title: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
+                let tk = core::cmp::min(label_names.len(), 8);
+                let args = LlmArgs { title: title.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: None, model: None };
+                let val = invoke("generate_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                let recs = match serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
+                    Ok(list) => list,
+                    Err(_) => {
+                        let lname = title.to_lowercase();
+                        let tokens: Vec<&str> = lname.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).collect();
+                        let mut scored: Vec<(TagInfo, i32)> = Vec::new();
+                        for t in &tags {
+                            let tname = t.name.to_lowercase();
+                            let mut score = 0;
+                            if !tname.is_empty() {
+                                if lname.contains(&tname) { score += 10; }
+                                if tokens.iter().any(|w| *w == tname) { score += 8; }
+                                if lname.starts_with(&tname) || lname.ends_with(&tname) { score += 4; }
+                            }
+                            if score > 0 { scored.push((t.clone(), score)); }
+                        }
+                        scored.sort_by(|a, b| b.1.cmp(&a.1));
+                        scored.into_iter().take(3).map(|(t, _)| RecommendItem { name: t.name.clone(), score: 0.0, source: String::from("rule") }).collect()
+                    }
+                };
+                let mut tag_out: Vec<TagInfo> = Vec::new();
+                for item in recs.iter() {
+                    if let Some(t) = tags.iter().find(|x| x.name == item.name) { tag_out.push(t.clone()); }
                 }
-                if score > 0 { scored.push((t.clone(), score)); }
+                total_buttons += tag_out.len();
+                info_map.insert(f.path.clone(), recs);
+                map.insert(f.id, tag_out);
+                if idx % 5 == 4 {
+                    set_map.set(map.clone());
+                    set_file_recommended_info_map.set(info_map.clone());
+                }
             }
-            scored.sort_by(|a, b| b.1.cmp(&a.1));
-            let mut out: Vec<TagInfo> = Vec::new();
-            for (i, (t, _)) in scored.into_iter().enumerate() {
-                if i >= 3 { break; }
-                out.push(t);
-            }
-            total_buttons += out.len();
-            map.insert(f.id, out);
-        }
-        set_file_recommended_tags_map.set(map);
-        set_show_recommended.set(true);
-        web_sys::console::log_1(&format!("[Recommend] ready with {} buttons", total_buttons).into());
+            set_map.set(map);
+            set_file_recommended_info_map.set(info_map);
+            set_show.set(true);
+            web_sys::console::log_1(&format!("[Recommend] ready with {} buttons · LLM bulk for {} files", total_buttons, max_files).into());
+        });
     };
     let (scanning, set_scanning) = signal(false);
     let (show_add_tag_dialog, set_show_add_tag_dialog) = signal(false);
@@ -925,18 +985,18 @@ pub fn App() -> impl IntoView {
                 <div class="center-panel">
                     <div class="panel-header">
                         <h2>"Files"</h2>
-                        <div class="file-controls" style="display:flex; gap:8px; align-items:center;">
+                        <div class="file-controls">
                             <button on:click=show_all>"Show All"</button>
                             <button on:click=toggle_and_or>
                                 {move || if use_and_logic.get() { "Filter: AND" } else { "Filter: OR" }}
                             </button>
-                            <button on:click=compute_title_recommendations>"Recommend (Title)"</button>
+                            <button on:click=compute_title_recommendations>"AI Recommend"</button>
                             <button on:click=move |_| {
                                 set_show_recommended.set(false);
                                 set_file_recommended_tags_map.set(std::collections::HashMap::new());
                                 web_sys::console::log_1(&"[Recommend] cleared".into());
                             }>
-                                "Hide"
+                                "Hide AI"
                             </button>
                         
                         </div>
@@ -954,7 +1014,12 @@ pub fn App() -> impl IntoView {
                         last_selected_file_path=last_selected_file_path
                         set_last_selected_file_path=set_last_selected_file_path
                         recommended_map=file_recommended_tags_map
+                        recommended_info_map=file_recommended_info_map
                         show_recommended=show_recommended
+                        all_tags=all_tags
+                        set_all_files=set_all_files
+                        set_displayed_files=set_displayed_files
+                        set_file_tags_map=set_file_tags_map
                     />
                 </div>
 
@@ -969,6 +1034,9 @@ pub fn App() -> impl IntoView {
                 <div class="right-sidebar" style=move || format!("width: {}px", right_panel_width.get())>
                     <div class="panel-header">
                         <h2>"File Tags"</h2>
+                        <div class="file-controls">
+                            <button on:click=recommend_selected>"AI Recommend Selected"</button>
+                        </div>
                     </div>
                     {move || {
                         let files = selected_file_paths.get();
@@ -1482,7 +1550,12 @@ fn GroupedFileList(
     last_selected_file_path: ReadSignal<Option<String>>,
     set_last_selected_file_path: WriteSignal<Option<String>>,
     recommended_map: ReadSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
+    recommended_info_map: ReadSignal<std::collections::HashMap<String, Vec<RecommendItem>>>,
     show_recommended: ReadSignal<bool>,
+    all_tags: ReadSignal<Vec<TagInfo>>,
+    set_all_files: WriteSignal<Vec<FileInfo>>,
+    set_displayed_files: WriteSignal<Vec<FileInfo>>,
+    set_file_tags_map: WriteSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
 ) -> impl IntoView {
     fn is_under_root(file_path: &str, root: &str) -> bool {
         let mut r = root.replace('/', "\\").to_lowercase();
@@ -1584,38 +1657,39 @@ fn GroupedFileList(
                                                                             }
                                                                         >
                                                                             <td on:dblclick=|e| e.stop_propagation()>
-                                                                                <input
-                                                                                    type="checkbox"
-                                                                                    prop:checked=move || selected_file_paths.get().contains(&file_path_for_checked)
-                                                                                    on:click={
-                                                                                        let value = group_paths.clone();
-                                                                                        move |ev: web_sys::MouseEvent| {
-                                                                                            let shift = ev.shift_key();
-                                                                                            if shift {
-                                                                                                let anchor = last_selected_file_path.get();
-                                                                                                let current = file_path_for_toggle.clone();
-                                                                                                let paths = (*value).clone();
-                                                                                                if let Some(a) = anchor {
-                                                                                                    let i1 = paths.iter().position(|p| p == &a);
-                                                                                                    let i2 = paths.iter().position(|p| p == &current);
-                                                                                                    if let (Some(s1), Some(s2)) = (i1, i2) {
-                                                                                                        let (s, e) = if s1 <= s2 { (s1, s2) } else { (s2, s1) };
-                                                                                                        let range = paths[s..=e].to_vec();
-                                                                                                        set_selected_file_paths.set(range);
+                                                                                    <input
+                                                                                        type="checkbox"
+                                                                                        prop:checked=move || selected_file_paths.get().contains(&file_path_for_checked)
+                                                                                        on:click={
+                                                                                            let value = group_paths.clone();
+                                                                                            let file_path_for_toggle_click = file_path_for_toggle.clone();
+                                                                                            move |ev: web_sys::MouseEvent| {
+                                                                                                let shift = ev.shift_key();
+                                                                                                if shift {
+                                                                                                    let anchor = last_selected_file_path.get();
+                                                                                                let current = file_path_for_toggle_click.clone();
+                                                                                                    let paths = (*value).clone();
+                                                                                                    if let Some(a) = anchor {
+                                                                                                        let i1 = paths.iter().position(|p| p == &a);
+                                                                                                        let i2 = paths.iter().position(|p| p == &current);
+                                                                                                        if let (Some(s1), Some(s2)) = (i1, i2) {
+                                                                                                            let (s, e) = if s1 <= s2 { (s1, s2) } else { (s2, s1) };
+                                                                                                            let range = paths[s..=e].to_vec();
+                                                                                                            set_selected_file_paths.set(range);
+                                                                                                        } else {
+                                                                                                            set_selected_file_paths.set(vec![current.clone()]);
+                                                                                                        }
                                                                                                     } else {
                                                                                                         set_selected_file_paths.set(vec![current.clone()]);
                                                                                                     }
-                                                                                                } else {
-                                                                                                    set_selected_file_paths.set(vec![current.clone()]);
-                                                                                                }
                                                                                                 set_last_selected_file_path.set(Some(current));
-                                                                                            } else {
-                                                                                                on_toggle(file_path_for_toggle.clone());
-                                                                                                set_last_selected_file_path.set(Some(file_path_for_toggle.clone()));
+                                                                                                } else {
+                                                                                                on_toggle(file_path_for_toggle_click.clone());
+                                                                                                set_last_selected_file_path.set(Some(file_path_for_toggle_click.clone()));
+                                                                                                }
                                                                                             }
                                                                                         }
-                                                                                    }
-                                                                                />
+                                                                                    />
                                                                             </td>
                                                                             <td class="file-path" title=file.path.clone()>
                                                                                 {if file.is_directory { "📁 " } else { "" }}
@@ -1651,28 +1725,37 @@ fn GroupedFileList(
                                                                                 <Show when=move || show_recommended.get() fallback=|| view!{}>
                                                                                 {
                                                                                     let fp_arc_for_recs = file_path_arc.clone();
+                                                                                    let file_path_key_for_recs = file_path_for_toggle.clone();
                                                                                     view! {
                                                                                         <div style="margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
                                                                                             <For
                                                                                                 each=move || {
-                                                                                                    if let Some(id) = file.db_id {
-                                                                                                        recommended_map.get().get(&id).cloned().unwrap_or_default()
-                                                                                                    } else { Vec::new() }
+                                                                                                    recommended_info_map.get().get(&file_path_key_for_recs).cloned().unwrap_or_default()
                                                                                                 }
-                                                                                                key=|t| t.id
-                                                                                                children=move |t| {
-                                                                                                    let tid = t.id;
+                                                                                                key=|ri| ri.name.clone()
+                                                                                                children=move |ri: RecommendItem| {
                                                                                                     let fp_arc_local = fp_arc_for_recs.clone();
+                                                                                                    let label = if ri.source == "onnx" { format!("{} ·AI", ri.name) } else if ri.source == "llm" { format!("{} ·LLM", ri.name) } else { ri.name.clone() };
+                                                                                                    let title_attr = format!("score: {:.3}", ri.score);
+                                                                                                    let tname = ri.name.clone();
                                                                                                     view! {
                                                                                                         <button style="background:#eee; color:#555; border:none; border-radius:10px; padding:2px 6px; cursor:pointer;"
+                                                                                                            title=title_attr
                                                                                                             on:click=move |_| {
                                                                                                                 let fp = (*fp_arc_local).clone();
-                                                                                                                let args = AddFileTagArgs { file_path: fp, tag_id: tid };
-                                                                                                                spawn_local(async move {
-                                                                                                                    let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                                                                                });
+                                                                                                                // lookup tag id by name
+                                                                                                                let mut found: Option<u32> = None;
+                                                                                                                for tg in all_tags.get().iter() { if tg.name == tname { found = Some(tg.id); break; } }
+                                                                                                                if let Some(tid) = found {
+                                                                                                                    let args = AddFileTagArgs { file_path: fp.clone(), tag_id: tid };
+                                                                                                                    spawn_local(async move {
+                                                                                                                        let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                                                                                        // Reload to reflect DB enrollment and new tag
+                                                                                                                        load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
+                                                                                                                    });
+                                                                                                                }
                                                                                                             }
-                                                                                                        >{t.name.clone()}</button>
+                                                                                                        >{label}</button>
                                                                                                     }
                                                                                                 }
                                                                                             />
@@ -1751,11 +1834,12 @@ fn GroupedFileList(
                                                                 prop:checked=move || selected_file_paths.get().contains(&file_path_for_checked)
                                                                 on:click={
                                                                     let value = all_paths.clone();
+                                                                    let file_path_for_toggle_click2 = file_path_for_toggle.clone();
                                                                     move |ev: web_sys::MouseEvent| {
                                                                         let shift = ev.shift_key();
                                                                         if shift {
                                                                             let anchor = last_selected_file_path.get();
-                                                                            let current = file_path_for_toggle.clone();
+                                                                            let current = file_path_for_toggle_click2.clone();
                                                                             let paths = (*value).clone();
                                                                             if let Some(a) = anchor {
                                                                                 let i1 = paths.iter().position(|p| p == &a);
@@ -1772,8 +1856,8 @@ fn GroupedFileList(
                                                                             }
                                                                             set_last_selected_file_path.set(Some(current));
                                                                         } else {
-                                                                            on_toggle(file_path_for_toggle.clone());
-                                                                            set_last_selected_file_path.set(Some(file_path_for_toggle.clone()));
+                                                                            on_toggle(file_path_for_toggle_click2.clone());
+                                                                            set_last_selected_file_path.set(Some(file_path_for_toggle_click2.clone()));
                                                                         }
                                                                     }
                                                                 }
@@ -1813,28 +1897,35 @@ fn GroupedFileList(
                                                             <Show when=move || show_recommended.get() fallback=|| view!{}>
                                                             {
                                                                 let fp_arc_for_recs = file_path_arc2.clone();
+                                                                let file_path_key_for_recs2 = file_path_for_toggle.clone();
                                                                 view! {
                                                                     <div style="margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
                                                                         <For
                                                                             each=move || {
-                                                                                if let Some(id) = file.db_id {
-                                                                                    recommended_map.get().get(&id).cloned().unwrap_or_default()
-                                                                                } else { Vec::new() }
+                                                                                recommended_info_map.get().get(&file_path_key_for_recs2).cloned().unwrap_or_default()
                                                                             }
-                                                                            key=|t| t.id
-                                                                            children=move |t| {
-                                                                                let tid = t.id;
+                                                                            key=|ri| ri.name.clone()
+                                                                            children=move |ri: RecommendItem| {
                                                                                 let fp_arc_local = fp_arc_for_recs.clone();
+                                                                                let label = if ri.source == "onnx" { format!("{} ·AI", ri.name) } else if ri.source == "llm" { format!("{} ·LLM", ri.name) } else { ri.name.clone() };
+                                                                                let title_attr = format!("score: {:.3}", ri.score);
+                                                                                let tname = ri.name.clone();
                                                                                 view! {
                                                                                     <button style="background:#eee; color:#555; border:none; border-radius:10px; padding:2px 6px; cursor:pointer;"
+                                                                                        title=title_attr
                                                                                         on:click=move |_| {
                                                                                             let fp = (*fp_arc_local).clone();
-                                                                                            let args = AddFileTagArgs { file_path: fp, tag_id: tid };
-                                                                                            spawn_local(async move {
-                                                                                                let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                                                            });
+                                                                                            let mut found: Option<u32> = None;
+                                                                                            for tg in all_tags.get().iter() { if tg.name == tname { found = Some(tg.id); break; } }
+                                                                                            if let Some(tid) = found {
+                                                                                                let args = AddFileTagArgs { file_path: fp.clone(), tag_id: tid };
+                                                                                                spawn_local(async move {
+                                                                                                    let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                                                                                                    load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
+                                                                                                });
+                                                                                            }
                                                                                         }
-                                                                                    >{t.name.clone()}</button>
+                                                                                    >{label}</button>
                                                                                 }
                                                                             }
                                                                         />
@@ -1935,3 +2026,5 @@ fn filter_files(
         }
     });
 }
+#[derive(Clone, Debug, Deserialize)]
+struct RecommendItem { name: String, score: f32, source: String }
