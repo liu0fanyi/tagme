@@ -67,8 +67,9 @@ jobs:
             - Confirm modal for database purge to prevent accidental deletion
             - Folder tagging support (is_directory + stable pseudo-hash)
             - Fix right panel tagging logic (works for scanned files and folders)
-            - Backend/frontend diagnostic logs for DB operations
-            - Version aligned to 0.1.0
+            - SQLite foreign keys enabled; default tags use actual parent IDs
+            - Tag delete uses in-app modal; selection and files refresh correctly
+            - Version aligned to 0.1.2
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
