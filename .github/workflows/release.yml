@@ -63,11 +63,10 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'TagMe v__VERSION__'
           releaseBody: |
-            - Confirm modal for database purge to prevent accidental deletion
-            - Folder tagging support (is_directory + stable pseudo-hash)
-            - Fix right panel tagging logic (works for scanned files and folders)
-            - SQLite foreign keys enabled; default tags use actual parent IDs
-            - Tag delete uses in-app modal; selection and files refresh correctly
+            - UI: Root directory toggle now has clear active styling
+            - DB: Auto-remove files when all tags are removed; cleanup after tag deletion
+            - DB: Fix PRAGMA execution (use query_row) to avoid setup panic; enable WAL/NORMAL
+            - UX: Hover/active styles unified for toolbar and root path chips
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
