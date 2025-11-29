@@ -56,21 +56,18 @@ jobs:
 
       - uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'TagMe ${{ github.ref_name }}'
+          releaseName: 'TagMe v__VERSION__'
           releaseBody: |
-            ## What's New in ${{ github.ref_name }}
-            
             - Confirm modal for database purge to prevent accidental deletion
             - Folder tagging support (is_directory + stable pseudo-hash)
             - Fix right panel tagging logic (works for scanned files and folders)
             - SQLite foreign keys enabled; default tags use actual parent IDs
             - Tag delete uses in-app modal; selection and files refresh correctly
-            - Version aligned to 0.1.3
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
