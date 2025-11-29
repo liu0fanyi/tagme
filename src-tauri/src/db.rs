@@ -754,6 +754,14 @@ pub fn delete_tag(app_handle: &AppHandle, id: u32) -> Result<()> {
     let conn = Connection::open(get_db_path(app_handle))?;
     let _ = conn.execute("PRAGMA foreign_keys = ON", [])?;
     conn.execute("DELETE FROM tags WHERE id = ?1", params![id])?;
+    conn.execute(
+        "DELETE FROM files WHERE id IN (
+            SELECT f.id FROM files f
+            LEFT JOIN file_tags ft ON f.id = ft.file_id
+            WHERE ft.file_id IS NULL
+        )",
+        [],
+    )?;
     Ok(())
 }
 
@@ -891,6 +899,15 @@ pub fn remove_file_tag(app_handle: &AppHandle, file_id: u32, tag_id: u32) -> Res
         "DELETE FROM file_tags WHERE file_id = ?1 AND tag_id = ?2",
         params![file_id, tag_id],
     )?;
+    let remaining: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM file_tags WHERE file_id = ?1",
+        params![file_id],
+        |row| row.get(0),
+    )?;
+    if remaining == 0 {
+        let _ = conn.execute("PRAGMA foreign_keys = ON", []);
+        conn.execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+    }
     Ok(())
 }
 
