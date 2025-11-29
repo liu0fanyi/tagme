@@ -702,6 +702,24 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+
+.root-path.active {
+  background: rgba(122, 162, 247, 0.30);
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+
+.root-path:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-blue);
+}
+
+span.root-path.active {
+  background: rgba(122, 162, 247, 0.40);
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(122, 162, 247, 0.25) inset;
 }
 
 /* Main Content */

@@ -190,7 +190,6 @@ pub fn App() -> impl IntoView {
     let (use_and_logic, set_use_and_logic) = signal(true);
     let (displayed_files, set_displayed_files) = signal(Vec::<FileInfo>::new());
     let (file_tags_map, set_file_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
-    let (file_tags_map, set_file_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
     let (selected_file_paths, set_selected_file_paths) = signal(Vec::<String>::new());
     let (last_selected_file_path, set_last_selected_file_path) = signal(None::<String>);
     let (file_recommended_tags_map, set_file_recommended_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
@@ -959,7 +958,7 @@ pub fn App() -> impl IntoView {
                                         view! {
                                             <span
                                                 class=move || if is_active() { "root-path active" } else { "root-path" }
-                                                style="padding:2px 6px; border:1px solid #ccc; border-radius:4px; display:inline-flex; align-items:center; gap:6px; cursor:pointer;"
+                                                style="padding:2px 6px; border-radius:4px; display:inline-flex; align-items:center; gap:6px; cursor:pointer;"
                                                 on:click=toggle_filter
                                             >
                                                 {rp_display.clone()}

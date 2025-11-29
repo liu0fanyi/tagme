@@ -61,8 +61,16 @@ pub fn init_db(app_handle: &AppHandle) -> Result<()> {
 
     let conn = Connection::open(&db_path)?;
     conn.execute("PRAGMA foreign_keys = ON", [])?;
-    let _ = conn.execute("PRAGMA journal_mode = WAL", [])?;
-    let _ = conn.execute("PRAGMA synchronous = NORMAL", [])?;
+    let _ = conn.query_row(
+        "PRAGMA journal_mode = WAL",
+        [],
+        |row| row.get::<_, String>(0),
+    );
+    let _ = conn.query_row(
+        "PRAGMA synchronous = NORMAL",
+        [],
+        |row| row.get::<_, i64>(0),
+    );
 
     // Roots table
     conn.execute(
