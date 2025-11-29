@@ -55,12 +55,6 @@ jobs:
       - name: install frontend dependencies
         run: npm install
 
-      - name: verify signing env
-        shell: pwsh
-        run: |
-          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { Write-Error "TAURI_SIGNING_PRIVATE_KEY is missing"; exit 1 } else { Write-Host "TAURI_SIGNING_PRIVATE_KEY ✓" }
-          if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) { Write-Error "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is missing"; exit 1 } else { Write-Host "TAURI_SIGNING_PRIVATE_KEY_PASSWORD ✓" }
-
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
