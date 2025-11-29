@@ -866,7 +866,11 @@ async fn updater_check(app_handle: tauri::AppHandle) -> Result<UpdateInfo, Strin
 async fn updater_install(app_handle: tauri::AppHandle) -> Result<(), String> {
     let updater = app_handle.updater().map_err(|e| e.to_string())?;
     if let Some(update) = updater.check().await.map_err(|e| e.to_string())? {
-        let bytes = update.download(|received: usize, total: Option<u64>| { let _ = (received, total); }, || {}).await.map_err(|e| e.to_string())?;
+        let app = app_handle.clone();
+        let bytes = update.download(|received: usize, total: Option<u64>| {
+            let _ = app.emit("update-download-progress", serde_json::json!({"received": received, "total": total}));
+        }, || {}).await.map_err(|e| e.to_string())?;
+        let _ = app_handle.emit("update-download-complete", ());
         update.install(bytes).map_err(|e| e.to_string())?;
     }
     Ok(())

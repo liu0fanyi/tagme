@@ -287,6 +287,10 @@ pub fn App() -> impl IntoView {
     let (update_current, set_update_current) = signal(String::new());
     let (update_latest, set_update_latest) = signal(String::new());
     let (update_has, set_update_has) = signal(false);
+    let (update_loading, set_update_loading) = signal(false);
+    let (update_downloading, set_update_downloading) = signal(false);
+    let (update_received, set_update_received) = signal(0usize);
+    let (update_total, set_update_total) = signal(None::<u64>);
     
     // Sorting state
     let (sort_column, set_sort_column) = signal(SortColumn::Name);
@@ -590,10 +594,18 @@ pub fn App() -> impl IntoView {
             let setup_listener = js_sys::Function::new_no_args(r#"
                 console.log('🔧 [FRONTEND] Setting up Tauri event listener...');
                 if (window.__TAURI__ && window.__TAURI__.event) {
+                    if (window.__TAGME_UPDATE_LISTENER_SET) { console.log('ℹ️ update listeners already set'); } else { window.__TAGME_UPDATE_LISTENER_SET = true; }
                     window.__TAURI__.event.listen('file-system-change', () => {
                         console.log('📬 [FRONTEND] File change detected by Tauri');
                         window.dispatchEvent(new CustomEvent('tauri-fs-change'));
                         console.log('✅ [FRONTEND] Custom event dispatched');
+                    });
+                    window.__TAURI__.event.listen('update-download-progress', (evt) => {
+                        const payload = evt && evt.payload ? evt.payload : {};
+                        window.dispatchEvent(new CustomEvent('tauri-update-progress', { detail: payload }));
+                    });
+                    window.__TAURI__.event.listen('update-download-complete', () => {
+                        window.dispatchEvent(new CustomEvent('tauri-update-complete'));
                     });
                     console.log('✅ [FRONTEND] Tauri event listener registered');
                 } else {
@@ -608,30 +620,66 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| {
         let window = web_sys::window().expect("no window");
         web_sys::console::log_1(&"🎧 [FRONTEND] Registering custom event listener for 'tauri-fs-change'".into());
-        let closure = Closure::wrap(Box::new(move |_: web_sys::Event| {
-            web_sys::console::log_1(&"📥 [FRONTEND] Custom event received, refreshing file list...".into());
-            let list = root_directories.get_untracked();
-            if !list.is_empty() {
-                set_scanning.set(true);
-                spawn_local(async move {
-                    #[derive(Serialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct ScanFilesMultiArgs { root_paths: Vec<String> }
-                    let args = ScanFilesMultiArgs { root_paths: list.clone() };
-                    if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
-                        invoke("scan_files_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await
-                    ) {
-                        set_scanned_files.set(files);
-                        load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
-                    }
-                    set_scanning.set(false);
-                });
-            }
-        }) as Box<dyn FnMut(_)>);
-        
-        let _ = window.add_event_listener_with_callback("tauri-fs-change", closure.as_ref().unchecked_ref());
-        web_sys::console::log_1(&"✅ [FRONTEND] Custom event listener registered".into());
-        closure.forget();
+        let flag = js_sys::Reflect::get(&window, &JsValue::from_str("__TAGME_FS_LISTENER_SET")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+        if !flag {
+            let closure = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                web_sys::console::log_1(&"📥 [FRONTEND] Custom event received, refreshing file list...".into());
+                let list = root_directories.get_untracked();
+                if !list.is_empty() {
+                    set_scanning.set(true);
+                    spawn_local(async move {
+                        #[derive(Serialize)]
+                        #[serde(rename_all = "camelCase")]
+                        struct ScanFilesMultiArgs { root_paths: Vec<String> }
+                        let args = ScanFilesMultiArgs { root_paths: list.clone() };
+                        if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
+                            invoke("scan_files_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                        ) {
+                            set_scanned_files.set(files);
+                            load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
+                        }
+                        set_scanning.set(false);
+                    });
+                }
+            }) as Box<dyn FnMut(_)>);
+            let _ = window.add_event_listener_with_callback("tauri-fs-change", closure.as_ref().unchecked_ref());
+            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__TAGME_FS_LISTENER_SET"), &JsValue::from_bool(true));
+            web_sys::console::log_1(&"✅ [FRONTEND] Custom event listener registered".into());
+            closure.forget();
+        }
+    });
+
+    Effect::new(move |_| {
+        let window = web_sys::window().expect("no window");
+        let flag = js_sys::Reflect::get(&window, &JsValue::from_str("__TAGME_UPDATE_PROGRESS_LISTENER_SET")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+        if !flag {
+            let closure = Closure::wrap(Box::new(move |ev: web_sys::Event| {
+                if let Some(ce) = ev.dyn_ref::<web_sys::CustomEvent>() {
+                    let detail = ce.detail();
+                    let rec = js_sys::Reflect::get(&detail, &JsValue::from_str("received")).ok().and_then(|v| v.as_f64()).map(|x| x as usize).unwrap_or(0usize);
+                    let tot = js_sys::Reflect::get(&detail, &JsValue::from_str("total")).ok().and_then(|v| if v.is_null() || v.is_undefined() { None } else { v.as_f64().map(|x| x as u64) });
+                    set_update_received.set(rec);
+                    set_update_total.set(tot);
+                    set_update_downloading.set(true);
+                }
+            }) as Box<dyn FnMut(_)>);
+            let _ = window.add_event_listener_with_callback("tauri-update-progress", closure.as_ref().unchecked_ref());
+            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__TAGME_UPDATE_PROGRESS_LISTENER_SET"), &JsValue::from_bool(true));
+            closure.forget();
+        }
+    });
+
+    Effect::new(move |_| {
+        let window = web_sys::window().expect("no window");
+        let flag = js_sys::Reflect::get(&window, &JsValue::from_str("__TAGME_UPDATE_COMPLETE_LISTENER_SET")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+        if !flag {
+            let closure = Closure::wrap(Box::new(move |_: web_sys::Event| {
+                set_update_downloading.set(false);
+            }) as Box<dyn FnMut(_)>);
+            let _ = window.add_event_listener_with_callback("tauri-update-complete", closure.as_ref().unchecked_ref());
+            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__TAGME_UPDATE_COMPLETE_LISTENER_SET"), &JsValue::from_bool(true));
+            closure.forget();
+        }
     });
 
     let select_directory = move |_| {
@@ -981,11 +1029,13 @@ pub fn App() -> impl IntoView {
                     let set_h = set_update_has;
                     move |_| {
                         spawn_local(async move {
+                            set_update_loading.set(true);
                             let val = invoke("updater_check", JsValue::NULL).await;
                             match serde_wasm_bindgen::from_value::<UpdateInfo>(val.clone()) {
                                 Ok(info) => { set_c.set(info.current); set_l.set(info.latest.unwrap_or_default()); set_h.set(info.has_update); set_modal.set(true); },
                                 Err(e) => { web_sys::console::error_1(&format!("[UI] updater_check error: {:?}; raw={:?}", e, val).into()); }
                             }
+                            set_update_loading.set(false);
                         });
                     }
                 }>
@@ -1351,8 +1401,12 @@ pub fn App() -> impl IntoView {
                         <Show when=move || update_has.get() fallback=move || view! { <p>"You are up to date."</p> }>
                             <div style="display:flex; gap:8px;">
                                 <button on:click=move |_| {
+                                    set_update_downloading.set(true);
+                                    set_update_received.set(0);
+                                    set_update_total.set(None);
                                     spawn_local(async move {
                                         let _ = invoke("updater_install", JsValue::NULL).await;
+                                        set_update_downloading.set(false);
                                     });
                                 }>
                                     "Install"
@@ -1360,7 +1414,7 @@ pub fn App() -> impl IntoView {
                             </div>
                         </Show>
                         <div style="margin-top:8px;">
-                            <button on:click=move |_| set_show_update_modal.set(false)>"Close"</button>
+                            <button on:click=move |ev: web_sys::MouseEvent| { ev.stop_propagation(); ev.prevent_default(); set_show_update_modal.set(false); set_update_loading.set(false); set_update_downloading.set(false); }>"Close"</button>
                         </div>
                     </div>
                 </div>
@@ -1433,6 +1487,25 @@ pub fn App() -> impl IntoView {
                         <div style="margin-top:12px; display:flex; gap:8px; justify-content:right;">
                             <button on:click=move |_| set_batch_cancel.set(true) style="background:#c33; color:#fff; border:none; padding:6px 12px; border-radius:4px;">"Cancel"</button>
                         </div>
+                    </div>
+                </div>
+            })}
+
+            {move || (update_loading.get() || update_downloading.get()).then(|| view! {
+                <div class="overlay-blocker" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.45);z-index:3000;display:flex;align-items:center;justify-content:center;">
+                    <div class="overlay-card" style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 12px; padding: 16px; min-width: 320px;">
+                        {move || {
+                            let is_checking = update_loading.get();
+                            let total = update_total.get();
+                            let received = update_received.get();
+                            let pct = if !is_checking { if let Some(t) = total { if t>0 { (received as f64 / t as f64 * 100.0) as i32 } else { 0 } } else { -1 } } else { -1 };
+                            let title = if is_checking { "Checking for updates...".to_string() } else { if pct >= 0 { format!("Downloading... {}%", pct) } else { "Downloading...".to_string() } };
+                            let width_text = if is_checking { "width: 25%".to_string() } else { if pct >= 0 { format!("width: {}%", pct) } else { "width: 25%".to_string() } };
+                            view! { <div>
+                                <div>{title}</div>
+                                <div class="progress-bar" style="width: 100%; height: 8px; background: var(--bg-primary); border-radius: 4px; margin-top: 8px;"><div class="progress-fill" style=move || width_text.clone()></div></div>
+                            </div> }
+                        }}
                     </div>
                 </div>
             })}
