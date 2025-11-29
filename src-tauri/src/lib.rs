@@ -1,4 +1,5 @@
 use tauri::{Emitter, Manager};
+use tauri_plugin_updater::UpdaterExt;
 use tauri_plugin_dialog::DialogExt;
 
 use notify::{Event, RecursiveMode, Watcher};
@@ -689,6 +690,8 @@ pub fn run() {
                 .set_focus();
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|_app| Ok(()))
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) = event {
                 let win = window.clone();
@@ -778,7 +781,9 @@ pub fn run() {
             generate_image_tags_llm,
             save_window_state,
             load_window_state,
-            open_file
+            open_file,
+            updater_check,
+            updater_install
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -842,4 +847,27 @@ fn recommend_tags_by_title(
     }
     scored.sort_by(|a, b| b.1.cmp(&a.1));
     Ok(scored.into_iter().take(top_k).map(|(t, _)| t).collect())
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct UpdateInfo { current: String, latest: Option<String>, has_update: bool }
+
+#[tauri::command]
+async fn updater_check(app_handle: tauri::AppHandle) -> Result<UpdateInfo, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let updater = app_handle.updater().map_err(|e| e.to_string())?;
+    match updater.check().await.map_err(|e| e.to_string())? {
+        Some(update) => Ok(UpdateInfo { current, latest: Some(update.version.clone()), has_update: true }),
+        None => Ok(UpdateInfo { current, latest: None, has_update: false }),
+    }
+}
+
+#[tauri::command]
+async fn updater_install(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let updater = app_handle.updater().map_err(|e| e.to_string())?;
+    if let Some(update) = updater.check().await.map_err(|e| e.to_string())? {
+        let bytes = update.download(|received: usize, total: Option<u64>| { let _ = (received, total); }, || {}).await.map_err(|e| e.to_string())?;
+        update.install(bytes).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }

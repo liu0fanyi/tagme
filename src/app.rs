@@ -284,6 +284,10 @@ pub fn App() -> impl IntoView {
     let (show_purge_confirm, set_show_purge_confirm) = signal(false);
     let (show_delete_tag_confirm, set_show_delete_tag_confirm) = signal(false);
     let (delete_target_tag_id, set_delete_target_tag_id) = signal(None::<u32>);
+    let (show_update_modal, set_show_update_modal) = signal(false);
+    let (update_current, set_update_current) = signal(String::new());
+    let (update_latest, set_update_latest) = signal(String::new());
+    let (update_has, set_update_has) = signal(false);
     
     // Sorting state
     let (sort_column, set_sort_column) = signal(SortColumn::Name);
@@ -971,6 +975,23 @@ pub fn App() -> impl IntoView {
                 <button on:click=scan_directory disabled=move || root_directories.get().is_empty()>
                     {move || if scanning.get() { "Scanning..." } else { "Scan Files" }}
                 </button>
+                <button on:click={
+                    let set_modal = set_show_update_modal;
+                    let set_c = set_update_current;
+                    let set_l = set_update_latest;
+                    let set_h = set_update_has;
+                    move |_| {
+                        spawn_local(async move {
+                            let val = invoke("updater_check", JsValue::NULL).await;
+                            match serde_wasm_bindgen::from_value::<UpdateInfo>(val.clone()) {
+                                Ok(info) => { set_c.set(info.current); set_l.set(info.latest.unwrap_or_default()); set_h.set(info.has_update); set_modal.set(true); },
+                                Err(e) => { web_sys::console::error_1(&format!("[UI] updater_check error: {:?}; raw={:?}", e, val).into()); }
+                            }
+                        });
+                    }
+                }>
+                    "Check Updates"
+                </button>
                 <button on:mousedown={move |_| {
                         web_sys::console::log_1(&"[UI] Clear DB Files mousedown".into());
                     }}
@@ -1317,6 +1338,30 @@ pub fn App() -> impl IntoView {
                                 }
                             }>"Confirm"</button>
                             <button on:click=move |_| set_show_purge_confirm.set(false)>"Cancel"</button>
+                        </div>
+                    </div>
+                </div>
+            })}
+
+            {move || show_update_modal.get().then(|| view! {
+                <div class="modal-overlay" on:click=move |_| set_show_update_modal.set(false)>
+                    <div class="modal" on:click={|e| e.stop_propagation()}>
+                        <h3>"Updates"</h3>
+                        <p>{format!("Current: {}", update_current.get())}</p>
+                        <p>{format!("Latest: {}", update_latest.get())}</p>
+                        <Show when=move || update_has.get() fallback=move || view! { <p>"You are up to date."</p> }>
+                            <div style="display:flex; gap:8px;">
+                                <button on:click=move |_| {
+                                    spawn_local(async move {
+                                        let _ = invoke("updater_install", JsValue::NULL).await;
+                                    });
+                                }>
+                                    "Install"
+                                </button>
+                            </div>
+                        </Show>
+                        <div style="margin-top:8px;">
+                            <button on:click=move |_| set_show_update_modal.set(false)>"Close"</button>
                         </div>
                     </div>
                 </div>
@@ -2244,3 +2289,6 @@ fn filter_files(
 }
 #[derive(Clone, Debug, Deserialize)]
 struct RecommendItem { name: String, score: f32, source: String }
+
+#[derive(Clone, Debug, Deserialize)]
+struct UpdateInfo { current: String, latest: Option<String>, has_update: bool }
