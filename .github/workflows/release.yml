@@ -63,11 +63,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'TagMe v__VERSION__'
           releaseBody: |
-            - Updater: 检查/安装显示透明遮罩与进度条，下载过程事件实时上报
-            - 修复：关闭更新弹窗的 wasm 闭包生命周期错误；防止事件监听重复注册
-            - UI：根目录路径 toggle 选中态更明显（active 背景/边框高亮）
-            - DB：移除文件的最后一个标签后自动删除 files 记录；删除标签后批量清理“无标签”文件
-            - DB：PRAGMA 改为 query_row 消费结果，避免 setup panic；启用 WAL/NORMAL
+            后台每10分钟检查更新；标题栏更新按钮仅打开弹窗。
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

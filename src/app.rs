@@ -291,6 +291,10 @@ pub fn App() -> impl IntoView {
     let (update_downloading, set_update_downloading) = signal(false);
     let (update_received, set_update_received) = signal(0usize);
     let (update_total, set_update_total) = signal(None::<u64>);
+    // 检查更新的错误信息（超时或失败时设置，用于弹窗提示）
+    let (update_error, set_update_error) = signal(None::<String>);
+    // 下次重试的秒数（例如 600 表示 10 分钟后重试，用于弹窗展示）
+    let (update_retry_in, set_update_retry_in) = signal(None::<u32>);
     
     // Sorting state
     let (sort_column, set_sort_column) = signal(SortColumn::Name);
@@ -682,6 +686,102 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    Effect::new(move || {
+        spawn_local(async move {
+            // 启动时进行一次后台检查，加入 8 秒超时控制，避免网络不佳时卡住体验
+            let window = web_sys::window().expect("no window");
+            // done 用于在超时回调中判断异步检查是否已完成
+            let done = std::rc::Rc::new(std::cell::Cell::new(false));
+            let done2 = done.clone();
+            // 8 秒超时：若检查仍未完成，则设置错误与重试信息（10 分钟后重试）
+            let timeout_cb = Closure::wrap(Box::new(move || {
+                if !done2.get() {
+                    set_update_error.set(Some(format!("检查更新超时，将在{}分钟后重试", 10)));
+                    set_update_retry_in.set(Some(600));
+                }
+            }) as Box<dyn FnMut()>);
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(timeout_cb.as_ref().unchecked_ref(), 8000);
+            timeout_cb.forget();
+
+            // 实际检查更新：成功则更新版本信息；失败则提示并设置重试
+            let val = invoke("updater_check", JsValue::NULL).await;
+            match serde_wasm_bindgen::from_value::<UpdateInfo>(val.clone()) {
+                Ok(info) => {
+                    // 检查成功，清理错误提示与重试信息，并更新版本状态
+                    done.set(true);
+                    set_update_error.set(None);
+                    set_update_retry_in.set(None);
+                    set_update_current.set(info.current);
+                    set_update_latest.set(info.latest.unwrap_or_default());
+                    set_update_has.set(info.has_update);
+                },
+                Err(_) => {
+                    // 检查失败，提示失败并设置 10 分钟后重试
+                    done.set(true);
+                    set_update_error.set(Some(format!("检查更新失败，将在{}分钟后重试", 10)));
+                    set_update_retry_in.set(Some(600));
+                }
+            }
+        });
+    });
+
+    Effect::new(move |_| {
+        let window = web_sys::window().expect("no window");
+        let flag = js_sys::Reflect::get(&window, &JsValue::from_str("__TAGME_AUTO_UPDATE_INTERVAL_SET")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+        if !flag {
+            let set_c = set_update_current;
+            let set_l = set_update_latest;
+            let set_h = set_update_has;
+            // 后台定时检查也维护错误与重试提示（无加载遮挡）
+            let set_err = set_update_error;
+            let set_retry = set_update_retry_in;
+            let cb = Closure::wrap(Box::new(move || {
+                let set_c2 = set_c;
+                let set_l2 = set_l;
+                let set_h2 = set_h;
+                let set_err2 = set_err;
+                let set_retry2 = set_retry;
+                spawn_local(async move {
+                    let window = web_sys::window().expect("no window");
+                    // 8 秒超时控制，避免后台任务长时间未返回
+                    let done = std::rc::Rc::new(std::cell::Cell::new(false));
+                    let done2 = done.clone();
+                    let timeout_cb = Closure::wrap(Box::new(move || {
+                        if !done2.get() {
+                            set_err2.set(Some(format!("检查更新超时，将在{}分钟后重试", 10)));
+                            set_retry2.set(Some(600));
+                        }
+                    }) as Box<dyn FnMut()>);
+                    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(timeout_cb.as_ref().unchecked_ref(), 8000);
+                    timeout_cb.forget();
+
+                    // 定时检查更新逻辑
+                    let val = invoke("updater_check", JsValue::NULL).await;
+                    match serde_wasm_bindgen::from_value::<UpdateInfo>(val.clone()) {
+                        Ok(info) => {
+                            // 检查成功，清理错误与重试信息，并刷新版本状态
+                            done.set(true);
+                            set_err2.set(None);
+                            set_retry2.set(None);
+                            set_c2.set(info.current);
+                            set_l2.set(info.latest.unwrap_or_default());
+                            set_h2.set(info.has_update);
+                        },
+                        Err(_) => {
+                            // 检查失败，设置提示与 10 分钟后重试
+                            done.set(true);
+                            set_err2.set(Some(format!("检查更新失败，将在{}分钟后重试", 10)));
+                            set_retry2.set(Some(600));
+                        }
+                    }
+                });
+            }) as Box<dyn FnMut()>);
+            let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), 600000);
+            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__TAGME_AUTO_UPDATE_INTERVAL_SET"), &JsValue::from_bool(true));
+            cb.forget();
+        }
+    });
+
     let select_directory = move |_| {
         spawn_local(async move {
             let path_val = invoke("select_root_directory", JsValue::NULL).await;
@@ -905,6 +1005,21 @@ pub fn App() -> impl IntoView {
             >
                 <h1>"TagMe"</h1>
                 <div class="header-buttons">
+                    <button on:click=move |_| set_show_update_modal.set(true) class="header-btn" title="Check Updates">
+                        {move || if update_has.get() {
+                            view! {
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
+                                    <path d="M12 2L2 22h20L12 2zm1 15h-2v-2h2v2zm0-4h-2V9h2v4z"/>
+                                </svg>
+                            }
+                        } else {
+                            view! {
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
+                                    <path d="M12 2a10 10 0 1 0 10 10A10.011 10.011 0 0 0 12 2zm1 14h-2v-4h2zm0-6h-2V8h2z"/>
+                                </svg>
+                            }
+                        }}
+                    </button>
                     <button on:click=move |_| minimize(()) class="header-btn" title="Minimize">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
                             <path d="M19 13H5v-2h14v2z"/>
@@ -1022,25 +1137,7 @@ pub fn App() -> impl IntoView {
                 <button on:click=scan_directory disabled=move || root_directories.get().is_empty()>
                     {move || if scanning.get() { "Scanning..." } else { "Scan Files" }}
                 </button>
-                <button on:click={
-                    let set_modal = set_show_update_modal;
-                    let set_c = set_update_current;
-                    let set_l = set_update_latest;
-                    let set_h = set_update_has;
-                    move |_| {
-                        spawn_local(async move {
-                            set_update_loading.set(true);
-                            let val = invoke("updater_check", JsValue::NULL).await;
-                            match serde_wasm_bindgen::from_value::<UpdateInfo>(val.clone()) {
-                                Ok(info) => { set_c.set(info.current); set_l.set(info.latest.unwrap_or_default()); set_h.set(info.has_update); set_modal.set(true); },
-                                Err(e) => { web_sys::console::error_1(&format!("[UI] updater_check error: {:?}; raw={:?}", e, val).into()); }
-                            }
-                            set_update_loading.set(false);
-                        });
-                    }
-                }>
-                    "Check Updates"
-                </button>
+                
                 <button on:mousedown={move |_| {
                         web_sys::console::log_1(&"[UI] Clear DB Files mousedown".into());
                     }}
@@ -1396,6 +1493,11 @@ pub fn App() -> impl IntoView {
                 <div class="modal-overlay" on:click=move |_| set_show_update_modal.set(false)>
                     <div class="modal" on:click={|e| e.stop_propagation()}>
                         <h3>"Updates"</h3>
+                        // 若启动或后台检查失败/超时，在更新弹窗顶部展示错误与下次重试时间
+                        {move || update_error.get().as_ref().map(|msg| view! {
+                            <p style="color:#c00;">{msg.clone()}</p>
+                            <p>{move || update_retry_in.get().map(|s| format!("下次重试：{}分钟后", s/60)).unwrap_or_default()}</p>
+                        })}
                         <p>{format!("Current: {}", update_current.get())}</p>
                         <p>{format!("Latest: {}", update_latest.get())}</p>
                         <Show when=move || update_has.get() fallback=move || view! { <p>"You are up to date."</p> }>

@@ -60,7 +60,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
 name = "app"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "async-openai",
  "base64 0.21.7",
@@ -79,7 +79,7 @@ dependencies = [
 
 [[package]]
 name = "app-ui"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
