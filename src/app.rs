@@ -448,69 +448,25 @@ pub fn App() -> impl IntoView {
                             check_id = tags.iter().find(|t| t.id == curr).and_then(|t| t.parent_id);
                         }
 
-                        if !is_descendant {
-                            web_sys::console::log_1(&format!("✅ Valid drop - moving tag {} under {}", dragged_id, target_id).into());
-
-                            // Calculate target position and parent based on drop position
-                            let tags = all_tags.get_untracked();
-                            let target_tag = tags.iter().find(|t| t.id == target_id);
-
-                            let (new_parent_id, target_position, action) = if let Some(tag) = target_tag {
-                                if pos < 0.25 {
-                                    // Insert before target tag (same parent)
-                                    if tag.parent_id == tags.iter().find(|t| t.id == dragged_id).and_then(|t| t.parent_id) {
-                                        // Moving within same parent - need special handling
-                                        let current_pos = tags.iter().find(|t| t.id == dragged_id).map(|t| t.position).unwrap_or(0);
-                                        if current_pos < tag.position {
-                                            // Moving forward, use target's position
-                                            (tag.parent_id, tag.position, "before-same-parent")
-                                        } else {
-                                            // Moving backward, use target's position
-                                            (tag.parent_id, tag.position, "before-same-parent")
-                                        }
-                                    } else {
-                                        // Moving to different parent
-                                        (tag.parent_id, tag.position, "before")
-                                    }
-                                } else if pos > 0.75 {
-                                    // Insert after target tag (same parent)
-                                    (tag.parent_id, tag.position + 1, "after")
-                                } else {
-                                    // As child of target tag
-                                    (Some(target_id), 0, "child")
-                                }
-                            } else {
-                                (None, 0, "root")
-                            };
-
+                        let nodes: Vec<leptos_dragdrop::Node> = all_tags
+                            .get_untracked()
+                            .iter()
+                            .map(|t| leptos_dragdrop::Node { id: t.id, parent_id: t.parent_id, position: t.position })
+                            .collect();
+                        if let Some((new_parent_id, target_position, action)) = leptos_dragdrop::compute_drop_action(dragged_id, target_id, pos, &nodes) {
                             web_sys::console::log_1(&format!("🎯 Action: {}, Parent: {:?}, Position: {}", action, new_parent_id, target_position).into());
-
                             spawn_local(async move {
-                                let args = MoveTagArgs {
-                                    id: dragged_id,
-                                    new_parent_id,
-                                    target_position,
-                                };
+                                let args = MoveTagArgs { id: dragged_id, new_parent_id, target_position };
                                 let _ = invoke("move_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                // Trigger reload
                                 set_reload_tags_trigger.update(|v| *v += 1);
                             });
                         } else {
-                            web_sys::console::log_1(&"⚠️ Cannot drop - would create cycle".into());
+                            web_sys::console::log_1(&"⚠️ Cannot drop - invalid target".into());
                         }
                     }
                 }
                 
-                set_dragging_tag_id.set(None);
-                set_drop_target_tag_id.set(None);
-                set_drag_just_ended.set(true);
-                let win = web_sys::window().unwrap();
-                let clear_flag = set_drag_just_ended;
-                let clear = Closure::<dyn FnMut()>::new(move || {
-                    clear_flag.set(false);
-                });
-                let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(clear.as_ref().unchecked_ref(), 100);
-                clear.forget();
+                leptos_dragdrop::end_drag(set_dragging_tag_id, set_drop_target_tag_id, set_drag_just_ended);
             }
         });
         
@@ -1771,31 +1727,17 @@ fn TagNode(
                     let height = rect.height();
                     
                     if height > 0.0 {
-                        let mut relative_y = ((y - top) / height).max(0.0).min(1.0);
-                        // Default to current tag as drop target
-                        let mut target_id_effective = tag_id;
-
-                        // Unify separator between items: when靠近底部，重定向到下一个item的顶部
-                        if relative_y > 0.75 {
-                            let tags_list = all_tags.get_untracked();
-                            let mut siblings: Vec<&TagInfo> = tags_list
-                                .iter()
-                                .filter(|t| t.parent_id == tag.parent_id)
-                                .collect();
-                            siblings.sort_by_key(|t| t.position);
-                            if let Some(next) = siblings.iter().find(|t| t.position > tag.position) {
-                                target_id_effective = next.id;
-                                relative_y = 0.0; // 作为下一个item之前的分隔
-                            }
-                        } else if relative_y < 0.25 {
-                            // 明确为当前item之前的分隔
-                            relative_y = 0.0;
-                        }
-
+                        let relative_y = ((y - top) / height).max(0.0).min(1.0);
+                        let nodes: Vec<leptos_dragdrop::Node> = all_tags
+                            .get_untracked()
+                            .iter()
+                            .map(|t| leptos_dragdrop::Node { id: t.id, parent_id: t.parent_id, position: t.position })
+                            .collect();
+                        let current = leptos_dragdrop::Node { id: tag_id, parent_id: tag.parent_id, position: tag.position };
+                        let (target_id_effective, pos_effective) = leptos_dragdrop::unify_hover_target(&nodes, current, relative_y);
                         set_drop_target_tag_id.set(Some(target_id_effective));
-                        set_drop_position.set(relative_y);
-                        web_sys::console::log_1(&format!("📍 Tag {} -> target {} position: {:.2} (y:{}, top:{}, height:{})", 
-                            tag_id, target_id_effective, relative_y, y, top, height).into());
+                        set_drop_position.set(pos_effective);
+                        web_sys::console::log_1(&format!("📍 Tag {} -> target {} position: {:.2}", tag_id, target_id_effective, pos_effective).into());
                     }
                 }
             }

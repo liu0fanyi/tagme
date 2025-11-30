@@ -18,6 +18,7 @@ pulldown-cmark = "0.13.0"
 web-sys = { version = "0.3", features = ["DragEvent", "DataTransfer", "HtmlElement", "DomRect", "Element", "Event", "MouseEvent", "Window", "console"] }
 regex = "1.10"
 leptos-updater = { path = "leptos-updater" }
+leptos-dragdrop = { path = "leptos-dragdrop" }
 
 [workspace]
-members = ["src-tauri", "updater-flow", "leptos-updater"]
+members = ["src-tauri", "updater-flow", "leptos-updater", "leptos-dragdrop"]

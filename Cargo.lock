@@ -85,6 +85,7 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "leptos",
+ "leptos-dragdrop",
  "leptos-updater",
  "leptos-use",
  "pulldown-cmark",
@@ -2635,6 +2636,15 @@ dependencies = [
  "throw_error",
  "typed-builder",
  "typed-builder-macro",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "leptos-dragdrop"
+version = "0.1.0"
+dependencies = [
+ "leptos",
  "wasm-bindgen",
  "web-sys",
 ]
