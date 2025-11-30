@@ -417,6 +417,16 @@ pub fn App() -> impl IntoView {
     let (drop_target_tag_id, set_drop_target_tag_id) = signal(None::<u32>);
     let (drop_position, set_drop_position) = signal(0.5f64); // 0.0=top, 1.0=bottom
     let (drag_just_ended, set_drag_just_ended) = signal(false);
+    let dnd = leptos_dragdrop::DndSignals {
+        dragging_id_read: dragging_tag_id,
+        dragging_id_write: set_dragging_tag_id,
+        drop_target_id_read: drop_target_tag_id,
+        drop_target_id_write: set_drop_target_tag_id,
+        drop_position_read: drop_position,
+        drop_position_write: set_drop_position,
+        drag_just_ended_read: drag_just_ended,
+        drag_just_ended_write: set_drag_just_ended,
+    };
     let (reload_tags_trigger, set_reload_tags_trigger) = signal(0u32);
     let (last_click_time, set_last_click_time) = signal(0.0);
     let (is_maximized, set_is_maximized) = signal(false);
@@ -964,6 +974,7 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    provide_context(dnd.clone());
     view! {
         <div class="app">
             <div class="header"
@@ -1164,6 +1175,7 @@ pub fn App() -> impl IntoView {
                         set_reload_tags_trigger=set_reload_tags_trigger
                         set_show_delete_tag_confirm=set_show_delete_tag_confirm
                         set_delete_target_tag_id=set_delete_target_tag_id
+                        dnd=dnd.clone()
                         drag_just_ended=drag_just_ended
                         set_drag_just_ended=set_drag_just_ended
                     />
@@ -1617,6 +1629,7 @@ fn TagTree(
     set_reload_tags_trigger: WriteSignal<u32>,
     drag_just_ended: ReadSignal<bool>,
     set_drag_just_ended: WriteSignal<bool>,
+    dnd: leptos_dragdrop::DndSignals,
 ) -> impl IntoView {
     let root_tags = move || {
         tags.get()
@@ -1684,6 +1697,7 @@ fn TagNode(
     drag_just_ended: ReadSignal<bool>,
     set_drag_just_ended: WriteSignal<bool>,
 ) -> AnyView {
+    let dnd = expect_context::<leptos_dragdrop::DndSignals>();
     let tag_id = tag.id;
     let children = move || {
         all_tags.get()
@@ -1699,21 +1713,7 @@ fn TagNode(
     let _is_drop_target = move || drop_target_tag_id.get() == Some(tag_id);
 
     // Mouse down - start drag
-    let on_mousedown = move |ev: web_sys::MouseEvent| {
-        if ev.button() == 0 {
-            if let Some(target) = ev.target() {
-                if target.dyn_ref::<web_sys::HtmlInputElement>().is_some() {
-                    return;
-                }
-                if target.dyn_ref::<web_sys::HtmlButtonElement>().is_some() {
-                    return;
-                }
-            }
-            set_dragging_tag_id.set(Some(tag_id));
-            web_sys::console::log_1(&format!("🟢 Start dragging tag: {}", tag_id).into());
-            ev.stop_propagation();
-        }
-    };
+    let on_mousedown = leptos_dragdrop::make_on_mousedown(dnd.clone(), tag_id);
 
     // Mouse enter - track potential drop target
     let update_position = move |ev: &web_sys::MouseEvent| {
@@ -1744,15 +1744,12 @@ fn TagNode(
         }
     };
 
-    let on_mouseenter = move |ev: web_sys::MouseEvent| {
-        web_sys::console::log_1(&format!("🟬 Hover over tag: {}", tag_id).into());
-        update_position(&ev);
+    let get_nodes = move || {
+        all_tags.get_untracked().iter().map(|t| leptos_dragdrop::Node { id: t.id, parent_id: t.parent_id, position: t.position }).collect::<Vec<_>>()
     };
-
-    let on_mousemove = move |ev: web_sys::MouseEvent| {
-        update_position(&ev);
-        ev.stop_propagation();
-    };
+    let current_node = leptos_dragdrop::Node { id: tag_id, parent_id: tag.parent_id, position: tag.position };
+    let on_mouseenter = leptos_dragdrop::make_on_mousemove(dnd.clone(), current_node, get_nodes);
+    let on_mousemove = leptos_dragdrop::make_on_mousemove(dnd.clone(), current_node, get_nodes);
 
     // Visual feedback based on drag state
     let node_class = move || {
@@ -1786,30 +1783,13 @@ fn TagNode(
                 on:mousedown=on_mousedown
                 on:mouseenter=on_mouseenter
                 on:mousemove=on_mousemove
-                on:click=move |ev: web_sys::MouseEvent| {
-                    if dragging_tag_id.get_untracked().is_some() || drag_just_ended.get_untracked() {
-                        ev.stop_propagation();
-                        ev.prevent_default();
-                    }
-                }
+                on:click=leptos_dragdrop::make_label_click_guard(dnd.clone())
             >
                 <input
                     type="checkbox"
                     prop:checked=is_selected
-                    on:change=move |ev: web_sys::Event| {
-                        if dragging_tag_id.get_untracked().is_none() && !drag_just_ended.get_untracked() {
-                            on_toggle(tag_id);
-                        } else {
-                            ev.stop_propagation();
-                            ev.prevent_default();
-                        }
-                    }
-                    on:click=move |ev: web_sys::MouseEvent| {
-                        if dragging_tag_id.get_untracked().is_some() || drag_just_ended.get_untracked() {
-                            ev.stop_propagation();
-                            ev.prevent_default();
-                        }
-                    }
+                    on:change=leptos_dragdrop::make_checkbox_change_guard(dnd.clone(), on_toggle, tag_id)
+                    on:click=leptos_dragdrop::make_checkbox_click_guard(dnd.clone())
                 />
                 <span class="tag-name" style=move || tag.color.clone().map(|c| format!("color: {}", c)).unwrap_or_default()>
                     {tag.name.clone()}
