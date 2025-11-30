@@ -3,6 +3,7 @@ use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+mod update;
 
 #[wasm_bindgen]
 extern "C" {
@@ -295,6 +296,26 @@ pub fn App() -> impl IntoView {
     let (update_error, set_update_error) = signal(None::<String>);
     // 下次重试的秒数（例如 600 表示 10 分钟后重试，用于弹窗展示）
     let (update_retry_in, set_update_retry_in) = signal(None::<u32>);
+    leptos_updater::init_update_system(leptos_updater::UpdaterArgs {
+        set_show_update_modal,
+        show_update_modal,
+        update_current,
+        set_update_current,
+        update_latest,
+        set_update_latest,
+        update_has,
+        set_update_has,
+        update_error,
+        set_update_error,
+        update_retry_in,
+        set_update_retry_in,
+        update_downloading,
+        set_update_downloading,
+        update_received,
+        set_update_received,
+        update_total,
+        set_update_total,
+    });
     
     // Sorting state
     let (sort_column, set_sort_column) = signal(SortColumn::Name);
@@ -1005,21 +1026,26 @@ pub fn App() -> impl IntoView {
             >
                 <h1>"TagMe"</h1>
                 <div class="header-buttons">
-                    <button on:click=move |_| set_show_update_modal.set(true) class="header-btn" title="Check Updates">
-                        {move || if update_has.get() {
-                            view! {
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
-                                    <path d="M12 2L2 22h20L12 2zm1 15h-2v-2h2v2zm0-4h-2V9h2v4z"/>
-                                </svg>
-                            }
-                        } else {
-                            view! {
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
-                                    <path d="M12 2a10 10 0 1 0 10 10A10.011 10.011 0 0 0 12 2zm1 14h-2v-4h2zm0-6h-2V8h2z"/>
-                                </svg>
-                            }
-                        }}
-                    </button>
+                    {leptos_updater::UpdateHeaderButton(leptos_updater::UpdateHeaderButtonProps { args: leptos_updater::UpdaterArgs {
+                        set_show_update_modal,
+                        show_update_modal,
+                        update_current,
+                        set_update_current,
+                        update_latest,
+                        set_update_latest,
+                        update_has,
+                        set_update_has,
+                        update_error,
+                        set_update_error,
+                        update_retry_in,
+                        set_update_retry_in,
+                        update_downloading,
+                        set_update_downloading,
+                        update_received,
+                        set_update_received,
+                        update_total,
+                        set_update_total,
+                    }})}
                     <button on:click=move |_| minimize(()) class="header-btn" title="Minimize">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="pointer-events: none;">
                             <path d="M19 13H5v-2h14v2z"/>
@@ -1489,38 +1515,26 @@ pub fn App() -> impl IntoView {
                 </div>
             })}
 
-            {move || show_update_modal.get().then(|| view! {
-                <div class="modal-overlay" on:click=move |_| set_show_update_modal.set(false)>
-                    <div class="modal" on:click={|e| e.stop_propagation()}>
-                        <h3>"Updates"</h3>
-                        // 若启动或后台检查失败/超时，在更新弹窗顶部展示错误与下次重试时间
-                        {move || update_error.get().as_ref().map(|msg| view! {
-                            <p style="color:#c00;">{msg.clone()}</p>
-                            <p>{move || update_retry_in.get().map(|s| format!("下次重试：{}分钟后", s/60)).unwrap_or_default()}</p>
-                        })}
-                        <p>{format!("Current: {}", update_current.get())}</p>
-                        <p>{format!("Latest: {}", update_latest.get())}</p>
-                        <Show when=move || update_has.get() fallback=move || view! { <p>"You are up to date."</p> }>
-                            <div style="display:flex; gap:8px;">
-                                <button on:click=move |_| {
-                                    set_update_downloading.set(true);
-                                    set_update_received.set(0);
-                                    set_update_total.set(None);
-                                    spawn_local(async move {
-                                        let _ = invoke("updater_install", JsValue::NULL).await;
-                                        set_update_downloading.set(false);
-                                    });
-                                }>
-                                    "Install"
-                                </button>
-                            </div>
-                        </Show>
-                        <div style="margin-top:8px;">
-                            <button on:click=move |ev: web_sys::MouseEvent| { ev.stop_propagation(); ev.prevent_default(); set_show_update_modal.set(false); set_update_loading.set(false); set_update_downloading.set(false); }>"Close"</button>
-                        </div>
-                    </div>
-                </div>
-            })}
+            {leptos_updater::UpdateModal(leptos_updater::UpdateModalProps { args: leptos_updater::UpdaterArgs {
+                set_show_update_modal,
+                show_update_modal,
+                update_current,
+                set_update_current,
+                update_latest,
+                set_update_latest,
+                update_has,
+                set_update_has,
+                update_error,
+                set_update_error,
+                update_retry_in,
+                set_update_retry_in,
+                update_downloading,
+                set_update_downloading,
+                update_received,
+                set_update_received,
+                update_total,
+                set_update_total,
+            }})}
 
             {move || show_delete_tag_confirm.get().then(|| view! {
                 <div class="modal-overlay" on:click=move |_| set_show_delete_tag_confirm.set(false)>

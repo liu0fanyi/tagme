@@ -1,5 +1,5 @@
 use tauri::{Emitter, Manager};
-use tauri_plugin_updater::UpdaterExt;
+use updater_flow::UpdateInfo;
 use tauri_plugin_dialog::DialogExt;
 
 use notify::{Event, RecursiveMode, Watcher};
@@ -849,29 +849,12 @@ fn recommend_tags_by_title(
     Ok(scored.into_iter().take(top_k).map(|(t, _)| t).collect())
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-struct UpdateInfo { current: String, latest: Option<String>, has_update: bool }
-
 #[tauri::command]
 async fn updater_check(app_handle: tauri::AppHandle) -> Result<UpdateInfo, String> {
-    let current = env!("CARGO_PKG_VERSION").to_string();
-    let updater = app_handle.updater().map_err(|e| e.to_string())?;
-    match updater.check().await.map_err(|e| e.to_string())? {
-        Some(update) => Ok(UpdateInfo { current, latest: Some(update.version.clone()), has_update: true }),
-        None => Ok(UpdateInfo { current, latest: None, has_update: false }),
-    }
+    updater_flow::check(app_handle).await
 }
 
 #[tauri::command]
 async fn updater_install(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let updater = app_handle.updater().map_err(|e| e.to_string())?;
-    if let Some(update) = updater.check().await.map_err(|e| e.to_string())? {
-        let app = app_handle.clone();
-        let bytes = update.download(|received: usize, total: Option<u64>| {
-            let _ = app.emit("update-download-progress", serde_json::json!({"received": received, "total": total}));
-        }, || {}).await.map_err(|e| e.to_string())?;
-        let _ = app_handle.emit("update-download-complete", ());
-        update.install(bytes).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    updater_flow::install(app_handle).await
 }
