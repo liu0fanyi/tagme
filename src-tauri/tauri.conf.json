@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TagMe",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "identifier": "com.tagme.app",
   "build": {
     "beforeDevCommand": "trunk serve",
@@ -22,7 +22,9 @@
         "shadow": true
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
@@ -36,5 +38,14 @@
     ],
     "createUpdaterArtifacts": true
   },
-  "plugins": { "updater": { "active": true, "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUwMUNGQ0NEMUREMENBMTYKUldRV3l0QWR6ZndjNEx2U1FJM3NHYjcrci9LOWhwV0hqSS9kK0l5R3UzZmtlV1lrd2Q5VGc2bEwK", "endpoints": ["https://github.com/liu0fanyi/tagme/releases/latest/download/latest.json"], "dialog": true } }
+  "plugins": {
+    "updater": {
+      "active": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUwMUNGQ0NEMUREMENBMTYKUldRV3l0QWR6ZndjNEx2U1FJM3NHYjcrci9LOWhwV0hqSS9kK0l5R3UzZmtlV1lrd2Q5VGc2bEwK",
+      "endpoints": [
+        "https://github.com/liu0fanyi/tagme/releases/latest/download/latest.json"
+      ],
+      "dialog": true
+    }
+  }
 }

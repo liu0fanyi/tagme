@@ -3,183 +3,24 @@ use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+pub mod api;
+pub mod components;
+pub mod drag_drop;
+pub mod files;
+pub mod resizing;
+pub mod types;
 mod update;
+pub mod utils;
 
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"])]
-    async fn invoke(cmd: &str, args: JsValue) -> JsValue;
-}
-
-// Lightweight file listing from scan (no hash)
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct FileListItem {
-    path: String,
-    size_bytes: u64,
-    last_modified: i64,
-    is_directory: bool,
-}
-
-// Full file info for files in database (with hash)
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct FileInfo {
-    id: u32,
-    path: String,
-    content_hash: String,
-    size_bytes: u64,
-    last_modified: i64,
-    is_directory: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct TagInfo {
-    id: u32,
-    name: String,
-    parent_id: Option<u32>,
-    color: Option<String>,
-    position: i32,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct FileWithTags {
-    file: FileInfo,
-    tags: Vec<TagInfo>,
-}
-
-#[derive(Clone, Debug, PartialEq, Copy)]
-enum SortColumn {
-    Name,
-    Size,
-    Date,
-    Type,
-}
-
-#[derive(Clone, Debug, PartialEq, Copy)]
-enum SortDirection {
-    Asc,
-    Desc,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct DisplayFile {
-    path: String,
-    name: String,
-    extension: String,
-    size_bytes: u64,
-    last_modified: i64,
-    db_id: Option<u32>,
-    tags: Vec<TagInfo>,
-    is_directory: bool,
-}
-
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateTagArgs {
-    name: String,
-    parent_id: Option<u32>,
-    color: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateTagArgs {
-    id: u32,
-    name: String,
-    color: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct DeleteTagArgs {
-    id: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MoveTagArgs {
-    id: u32,
-    new_parent_id: Option<u32>,
-    target_position: i32,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AddFileTagArgs {
-    file_path: String,
-    tag_id: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoveFileTagArgs {
-    file_id: u32,
-    tag_id: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GetFileTagsArgs {
-    file_id: u32,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FilterFilesByTagsArgs {
-    tag_ids: Vec<u32>,
-    use_and_logic: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ScanFilesArgs {
-    root_path: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenFileArgs {
-    path: String,
-}
-
-
-fn format_file_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-fn format_timestamp(ts: i64) -> String {
-    // Completely avoid JavaScript Date API - just show raw timestamp or simple format
-    if ts <= 0 {
-        return "Unknown".to_string();
-    }
-    
-    // Calculate components from Unix timestamp
-    // This is 100% Rust, no JavaScript involved
-    const SECONDS_PER_MINUTE: i64 = 60;
-    const SECONDS_PER_HOUR: i64 = 3600;
-    const SECONDS_PER_DAY: i64 = 86400;
-    
-    let total_days = ts / SECONDS_PER_DAY;
-    let remaining_after_days = ts % SECONDS_PER_DAY;
-    let hours = remaining_after_days / SECONDS_PER_HOUR;
-    let remaining_after_hours = remaining_after_days % SECONDS_PER_HOUR;
-    let minutes = remaining_after_hours / SECONDS_PER_MINUTE;
-    let seconds = remaining_after_hours % SECONDS_PER_MINUTE;
-    
-    // Simple readable format without calling any JS Date methods
-    format!("{} days, {:02}:{:02}:{:02}", total_days, hours, minutes, seconds)
-}
+use crate::app::api::invoke;
+use crate::app::components::file_list::*;
+use crate::app::components::tag_tree::*;
+use crate::app::drag_drop::*;
+use crate::app::files::*;
+use crate::app::resizing::*;
+use crate::app::types::*;
+use crate::app::utils::*;
+use leptos_recommender::RecommendItem;
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -190,11 +31,14 @@ pub fn App() -> impl IntoView {
     let (selected_tag_ids, set_selected_tag_ids) = signal(Vec::<u32>::new());
     let (use_and_logic, set_use_and_logic) = signal(true);
     let (displayed_files, set_displayed_files) = signal(Vec::<FileInfo>::new());
-    let (file_tags_map, set_file_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
+    let (file_tags_map, set_file_tags_map) =
+        signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
     let (selected_file_paths, set_selected_file_paths) = signal(Vec::<String>::new());
     let (last_selected_file_path, set_last_selected_file_path) = signal(None::<String>);
-    let (file_recommended_tags_map, set_file_recommended_tags_map) = signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
-    let (file_recommended_info_map, set_file_recommended_info_map) = signal(std::collections::HashMap::<String, Vec<RecommendItem>>::new());
+    let (file_recommended_tags_map, set_file_recommended_tags_map) =
+        signal(std::collections::HashMap::<u32, Vec<TagInfo>>::new());
+    let (file_recommended_info_map, set_file_recommended_info_map) =
+        signal(std::collections::HashMap::<String, Vec<RecommendItem>>::new());
     let (show_recommended, set_show_recommended) = signal(false);
     let (batch_running, set_batch_running) = signal(false);
     let (batch_progress, set_batch_progress) = signal(0usize);
@@ -205,7 +49,9 @@ pub fn App() -> impl IntoView {
         if let Some(win) = web_sys::window() {
             if let Some(doc) = win.document() {
                 if let Some(body) = doc.body() {
-                    let _ = body.style().set_property("overflow", if running { "hidden" } else { "" });
+                    let _ = body
+                        .style()
+                        .set_property("overflow", if running { "hidden" } else { "" });
                 }
             }
         }
@@ -213,10 +59,16 @@ pub fn App() -> impl IntoView {
             web_sys::console::log_1(&"[Overlay] on".into());
             if let Some(win) = web_sys::window() {
                 let set_cancel = set_batch_cancel;
-                let on_key = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
-                    if e.key() == "Escape" { set_cancel.set(true); }
-                });
-                let _ = win.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
+                let on_key =
+                    wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+                        move |e: web_sys::KeyboardEvent| {
+                            if e.key() == "Escape" {
+                                set_cancel.set(true);
+                            }
+                        },
+                    );
+                let _ = win
+                    .add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
                 on_key.forget();
             }
         } else {
@@ -224,7 +76,9 @@ pub fn App() -> impl IntoView {
         }
     });
     let recommend_all = move |_| {
-        if batch_running.get() { return; }
+        if batch_running.get() {
+            return;
+        }
         let files = displayed_files.get();
         let tags = all_tags.get();
         let set_map = set_file_recommended_tags_map;
@@ -244,20 +98,44 @@ pub fn App() -> impl IntoView {
             let mut info_map = std::collections::HashMap::new();
             let mut tag_map = std::collections::HashMap::new();
             for (i, f) in files.iter().enumerate() {
-                if cancel_sig.get_untracked() { break; }
+                if cancel_sig.get_untracked() {
+                    break;
+                }
                 let path = f.path.clone();
                 let label_names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
                 let tk = core::cmp::min(label_names.len(), 8);
-                let list_ext = leptos_recommender::generate_for_file(path.clone(), label_names.clone(), tk, 0.6, Some(String::from("https://api.siliconflow.cn/v1")), None).await;
+                let list_ext = leptos_recommender::generate_for_file(
+                    path.clone(),
+                    label_names.clone(),
+                    tk,
+                    0.6,
+                    Some(String::from("https://api.siliconflow.cn/v1")),
+                    None,
+                )
+                .await;
                 if !list_ext.is_empty() {
-                    let list: Vec<RecommendItem> = list_ext.into_iter().map(|ri| RecommendItem { name: ri.name, score: ri.score, source: ri.source }).collect();
+                    let list: Vec<RecommendItem> = list_ext
+                        .into_iter()
+                        .map(|ri| RecommendItem {
+                            name: ri.name,
+                            score: ri.score,
+                            source: ri.source,
+                        })
+                        .collect();
                     info_map.insert(path.clone(), list.clone());
                     let mut out: Vec<TagInfo> = Vec::new();
-                    for item in list { if let Some(t) = tags.iter().find(|x| x.name == item.name) { out.push(t.clone()); } }
+                    for item in list {
+                        if let Some(t) = tags.iter().find(|x| x.name == item.name) {
+                            out.push(t.clone());
+                        }
+                    }
                     tag_map.insert(f.id, out);
                 }
                 set_prog.set(i + 1);
-                if i % 5 == 4 { set_map.set(tag_map.clone()); set_info.set(info_map.clone()); }
+                if i % 5 == 4 {
+                    set_map.set(tag_map.clone());
+                    set_info.set(info_map.clone());
+                }
             }
             set_map.set(tag_map);
             set_info.set(info_map);
@@ -305,7 +183,7 @@ pub fn App() -> impl IntoView {
         update_total,
         set_update_total,
     });
-    
+
     // Sorting state
     let (sort_column, set_sort_column) = signal(SortColumn::Name);
     let (sort_direction, set_sort_direction) = signal(SortDirection::Asc);
@@ -322,16 +200,24 @@ pub fn App() -> impl IntoView {
         let scanned = scanned_files.get();
         let db = displayed_files.get();
         let tags_map = file_tags_map.get();
-        
+
         let mut display_files: Vec<DisplayFile> = Vec::new();
         let mut seen_paths = std::collections::HashSet::new();
 
         // Add DB files first
         for file in db {
             let path_obj = std::path::Path::new(&file.path);
-            let name = path_obj.file_name().unwrap_or_default().to_string_lossy().to_string();
-            let extension = path_obj.extension().unwrap_or_default().to_string_lossy().to_string();
-            
+            let name = path_obj
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let extension = path_obj
+                .extension()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
             seen_paths.insert(file.path.clone());
             display_files.push(DisplayFile {
                 path: file.path.clone(),
@@ -351,9 +237,17 @@ pub fn App() -> impl IntoView {
             for file in scanned {
                 if !seen_paths.contains(&file.path) {
                     let path_obj = std::path::Path::new(&file.path);
-                    let name = path_obj.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    let extension = path_obj.extension().unwrap_or_default().to_string_lossy().to_string();
-                    
+                    let name = path_obj
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let extension = path_obj
+                        .extension()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+
                     display_files.push(DisplayFile {
                         path: file.path.clone(),
                         name,
@@ -371,7 +265,7 @@ pub fn App() -> impl IntoView {
         // Sort
         let col = sort_column.get();
         let dir = sort_direction.get();
-        
+
         display_files.sort_by(|a, b| {
             let cmp = match col {
                 SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
@@ -379,7 +273,7 @@ pub fn App() -> impl IntoView {
                 SortColumn::Date => a.last_modified.cmp(&b.last_modified),
                 SortColumn::Type => a.extension.to_lowercase().cmp(&b.extension.to_lowercase()),
             };
-            
+
             match dir {
                 SortDirection::Asc => cmp,
                 SortDirection::Desc => cmp.reverse(),
@@ -391,16 +285,18 @@ pub fn App() -> impl IntoView {
 
     let toggle_sort = move |col: SortColumn| {
         if sort_column.get() == col {
-            set_sort_direction.update(|d| *d = match d {
-                SortDirection::Asc => SortDirection::Desc,
-                SortDirection::Desc => SortDirection::Asc,
+            set_sort_direction.update(|d| {
+                *d = match d {
+                    SortDirection::Asc => SortDirection::Desc,
+                    SortDirection::Desc => SortDirection::Asc,
+                }
             });
         } else {
             set_sort_column.set(col);
             set_sort_direction.set(SortDirection::Asc);
         }
     };
-    
+
     // Drag and drop state
     let (dragging_tag_id, set_dragging_tag_id) = signal(None::<u32>);
     let (drop_target_tag_id, set_drop_target_tag_id) = signal(None::<u32>);
@@ -421,91 +317,27 @@ pub fn App() -> impl IntoView {
     let (is_maximized, set_is_maximized) = signal(false);
 
     // Global mouse up handler for drag and drop
-    Effect::new(move |_| {
-        let window = web_sys::window().unwrap();
-        
-        let on_mouseup = Closure::<dyn FnMut(_)>::new(move |_ev: web_sys::MouseEvent| {
-            if let Some(dragged_id) = dragging_tag_id.get_untracked() {
-                web_sys::console::log_1(&format!("🔵 Mouse up - dragged_id: {}", dragged_id).into());
-                
-                if let Some(target_id) = drop_target_tag_id.get_untracked() {
-                    web_sys::console::log_1(&format!("🔵 Drop target: {}", target_id).into());
-                    
-                    let pos = drop_position.get_untracked();
-                    web_sys::console::log_1(&format!("📍 Drop position: {:.2}", pos).into());
-                    
-                    if dragged_id != target_id {
-                        // Check for cycles
-                        let tags = all_tags.get_untracked();
-                        let mut is_descendant = false;
-                        let mut check_id = Some(target_id);
-                        while let Some(curr) = check_id {
-                            if curr == dragged_id {
-                                is_descendant = true;
-                                break;
-                            }
-                            check_id = tags.iter().find(|t| t.id == curr).and_then(|t| t.parent_id);
-                        }
-
-                        let nodes: Vec<leptos_dragdrop::Node> = all_tags
-                            .get_untracked()
-                            .iter()
-                            .map(|t| leptos_dragdrop::Node { id: t.id, parent_id: t.parent_id, position: t.position })
-                            .collect();
-                        if let Some((new_parent_id, target_position, action)) = leptos_dragdrop::compute_drop_action(dragged_id, target_id, pos, &nodes) {
-                            web_sys::console::log_1(&format!("🎯 Action: {}, Parent: {:?}, Position: {}", action, new_parent_id, target_position).into());
-                            spawn_local(async move {
-                                let args = MoveTagArgs { id: dragged_id, new_parent_id, target_position };
-                                let _ = invoke("move_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                set_reload_tags_trigger.update(|v| *v += 1);
-                            });
-                        } else {
-                            web_sys::console::log_1(&"⚠️ Cannot drop - invalid target".into());
-                        }
-                    }
-                }
-                
-                leptos_dragdrop::end_drag(set_dragging_tag_id, set_drop_target_tag_id, set_drag_just_ended);
-            }
-        });
-        
-        let _ = window.add_event_listener_with_callback("mouseup", on_mouseup.as_ref().unchecked_ref());
-        on_mouseup.forget();
-    });
+    setup_drag_drop(
+        dragging_tag_id,
+        set_dragging_tag_id,
+        drop_target_tag_id,
+        set_drop_target_tag_id,
+        drop_position,
+        set_drop_position,
+        set_drag_just_ended,
+        all_tags,
+        set_reload_tags_trigger,
+    );
 
     // Global mouse handlers for panel resizing
-    Effect::new(move |_| {
-        let window = web_sys::window().unwrap();
-        
-        // Mouse move handler for resizing
-        let on_mousemove = Closure::<dyn FnMut(_)>::new(move |ev: web_sys::MouseEvent| {
-            if is_resizing_left.get_untracked() {
-                let x = ev.client_x() as f64;
-                let new_width = x.max(200.0).min(600.0); // Min 200px, max 600px
-                web_sys::console::log_1(&format!("Resizing left panel to: {}", new_width).into());
-                set_left_panel_width.set(new_width);
-            } else if is_resizing_right.get_untracked() {
-                let window_width = web_sys::window().unwrap().inner_width().unwrap().as_f64().unwrap();
-                let x = ev.client_x() as f64;
-                let new_width = (window_width - x).max(200.0).min(600.0);
-                web_sys::console::log_1(&format!("Resizing right panel to: {}", new_width).into());
-                set_right_panel_width.set(new_width);
-            }
-        });
-        
-        let _ = window.add_event_listener_with_callback("mousemove", on_mousemove.as_ref().unchecked_ref());
-        on_mousemove.forget();
-        
-        // Mouse up handler to stop resizing
-        let on_mouseup_resize = Closure::<dyn FnMut(_)>::new(move |_ev: web_sys::MouseEvent| {
-            web_sys::console::log_1(&"Mouse up - stopping resize".into());
-            set_is_resizing_left.set(false);
-            set_is_resizing_right.set(false);
-        });
-        
-        let _ = window.add_event_listener_with_callback("mouseup", on_mouseup_resize.as_ref().unchecked_ref());
-        on_mouseup_resize.forget();
-    });
+    setup_resizing(
+        is_resizing_left,
+        set_is_resizing_left,
+        is_resizing_right,
+        set_is_resizing_right,
+        set_left_panel_width,
+        set_right_panel_width,
+    );
 
     // Effect to reload tags when trigger changes
     Effect::new(move |_| {
@@ -520,25 +352,30 @@ pub fn App() -> impl IntoView {
     // Load initial state
     Effect::new(move || {
         spawn_local(async move {
-            let roots: Result<Vec<String>, _> = serde_wasm_bindgen::from_value(
-                invoke("get_root_directories", JsValue::NULL).await
-            );
+            let roots: Result<Vec<String>, _> =
+                serde_wasm_bindgen::from_value(invoke("get_root_directories", JsValue::NULL).await);
             match roots {
                 Ok(list) => {
                     if list.is_empty() {
                         let root: Option<String> = serde_wasm_bindgen::from_value(
-                            invoke("get_root_directory", JsValue::NULL).await
-                        ).unwrap_or(None);
-                        if let Some(p) = root { set_root_directories.set(vec![p]); }
+                            invoke("get_root_directory", JsValue::NULL).await,
+                        )
+                        .unwrap_or(None);
+                        if let Some(p) = root {
+                            set_root_directories.set(vec![p]);
+                        }
                     } else {
                         set_root_directories.set(list);
                     }
-                },
+                }
                 Err(_) => {
                     let root: Option<String> = serde_wasm_bindgen::from_value(
-                        invoke("get_root_directory", JsValue::NULL).await
-                    ).unwrap_or(None);
-                    if let Some(p) = root { set_root_directories.set(vec![p]); }
+                        invoke("get_root_directory", JsValue::NULL).await,
+                    )
+                    .unwrap_or(None);
+                    if let Some(p) = root {
+                        set_root_directories.set(vec![p]);
+                    }
                 }
             }
 
@@ -551,15 +388,23 @@ pub fn App() -> impl IntoView {
             // Load window state
             let state_value = invoke("load_window_state", JsValue::NULL).await;
             let _ = state_value; // Unused for now
-            
+
             let list = root_directories.get_untracked();
             if !list.is_empty() {
                 spawn_local(async move {
                     #[derive(Serialize)]
                     #[serde(rename_all = "camelCase")]
-                    struct StartWatchingMultiArgs { root_paths: Vec<String> }
-                    let args = StartWatchingMultiArgs { root_paths: list.clone() };
-                    let _ = invoke("start_watching_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await;
+                    struct StartWatchingMultiArgs {
+                        root_paths: Vec<String>,
+                    }
+                    let args = StartWatchingMultiArgs {
+                        root_paths: list.clone(),
+                    };
+                    let _ = invoke(
+                        "start_watching_multi",
+                        serde_wasm_bindgen::to_value(&args).unwrap(),
+                    )
+                    .await;
                 });
             }
 
@@ -568,19 +413,28 @@ pub fn App() -> impl IntoView {
                 spawn_local(async move {
                     #[derive(Serialize)]
                     #[serde(rename_all = "camelCase")]
-                    struct ScanFilesMultiArgs { root_paths: Vec<String> }
-                    let args = ScanFilesMultiArgs { root_paths: list2.clone() };
+                    struct ScanFilesMultiArgs {
+                        root_paths: Vec<String>,
+                    }
+                    let args = ScanFilesMultiArgs {
+                        root_paths: list2.clone(),
+                    };
                     if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
-                        invoke("scan_files_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                        invoke(
+                            "scan_files_multi",
+                            serde_wasm_bindgen::to_value(&args).unwrap(),
+                        )
+                        .await,
                     ) {
                         set_scanned_files.set(files);
                         load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
                     }
                 });
             }
-            
+
             // Setup file system change listener
-            let setup_listener = js_sys::Function::new_no_args(r#"
+            let setup_listener = js_sys::Function::new_no_args(
+                r#"
                 console.log('🔧 [FRONTEND] Setting up Tauri event listener...');
                 if (window.__TAURI__ && window.__TAURI__.event) {
                     if (window.__TAGME_UPDATE_LISTENER_SET) { console.log('ℹ️ update listeners already set'); } else { window.__TAGME_UPDATE_LISTENER_SET = true; }
@@ -600,39 +454,63 @@ pub fn App() -> impl IntoView {
                 } else {
                     console.error('❌ [FRONTEND] Tauri event API not available');
                 }
-            "#);
+            "#,
+            );
             let _ = setup_listener.call0(&JsValue::NULL);
         });
     });
-    
+
     // Listen for custom file change events and trigger scan
     Effect::new(move |_| {
         let window = web_sys::window().expect("no window");
-        web_sys::console::log_1(&"🎧 [FRONTEND] Registering custom event listener for 'tauri-fs-change'".into());
-        let flag = js_sys::Reflect::get(&window, &JsValue::from_str("__TAGME_FS_LISTENER_SET")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+        web_sys::console::log_1(
+            &"🎧 [FRONTEND] Registering custom event listener for 'tauri-fs-change'".into(),
+        );
+        let flag = js_sys::Reflect::get(&window, &JsValue::from_str("__TAGME_FS_LISTENER_SET"))
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if !flag {
             let closure = Closure::wrap(Box::new(move |_: web_sys::Event| {
-                web_sys::console::log_1(&"📥 [FRONTEND] Custom event received, refreshing file list...".into());
+                web_sys::console::log_1(
+                    &"📥 [FRONTEND] Custom event received, refreshing file list...".into(),
+                );
                 let list = root_directories.get_untracked();
                 if !list.is_empty() {
                     set_scanning.set(true);
                     spawn_local(async move {
                         #[derive(Serialize)]
                         #[serde(rename_all = "camelCase")]
-                        struct ScanFilesMultiArgs { root_paths: Vec<String> }
-                        let args = ScanFilesMultiArgs { root_paths: list.clone() };
+                        struct ScanFilesMultiArgs {
+                            root_paths: Vec<String>,
+                        }
+                        let args = ScanFilesMultiArgs {
+                            root_paths: list.clone(),
+                        };
                         if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
-                            invoke("scan_files_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await
+                            invoke(
+                                "scan_files_multi",
+                                serde_wasm_bindgen::to_value(&args).unwrap(),
+                            )
+                            .await,
                         ) {
                             set_scanned_files.set(files);
-                            load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
+                            load_all_files(set_all_files, set_displayed_files, set_file_tags_map)
+                                .await;
                         }
                         set_scanning.set(false);
                     });
                 }
             }) as Box<dyn FnMut(_)>);
-            let _ = window.add_event_listener_with_callback("tauri-fs-change", closure.as_ref().unchecked_ref());
-            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__TAGME_FS_LISTENER_SET"), &JsValue::from_bool(true));
+            let _ = window.add_event_listener_with_callback(
+                "tauri-fs-change",
+                closure.as_ref().unchecked_ref(),
+            );
+            let _ = js_sys::Reflect::set(
+                &window,
+                &JsValue::from_str("__TAGME_FS_LISTENER_SET"),
+                &JsValue::from_bool(true),
+            );
             web_sys::console::log_1(&"✅ [FRONTEND] Custom event listener registered".into());
             closure.forget();
         }
@@ -640,33 +518,71 @@ pub fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         let window = web_sys::window().expect("no window");
-        let flag = js_sys::Reflect::get(&window, &JsValue::from_str("__TAGME_UPDATE_PROGRESS_LISTENER_SET")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+        let flag = js_sys::Reflect::get(
+            &window,
+            &JsValue::from_str("__TAGME_UPDATE_PROGRESS_LISTENER_SET"),
+        )
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
         if !flag {
             let closure = Closure::wrap(Box::new(move |ev: web_sys::Event| {
                 if let Some(ce) = ev.dyn_ref::<web_sys::CustomEvent>() {
                     let detail = ce.detail();
-                    let rec = js_sys::Reflect::get(&detail, &JsValue::from_str("received")).ok().and_then(|v| v.as_f64()).map(|x| x as usize).unwrap_or(0usize);
-                    let tot = js_sys::Reflect::get(&detail, &JsValue::from_str("total")).ok().and_then(|v| if v.is_null() || v.is_undefined() { None } else { v.as_f64().map(|x| x as u64) });
+                    let rec = js_sys::Reflect::get(&detail, &JsValue::from_str("received"))
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                        .map(|x| x as usize)
+                        .unwrap_or(0usize);
+                    let tot = js_sys::Reflect::get(&detail, &JsValue::from_str("total"))
+                        .ok()
+                        .and_then(|v| {
+                            if v.is_null() || v.is_undefined() {
+                                None
+                            } else {
+                                v.as_f64().map(|x| x as u64)
+                            }
+                        });
                     set_update_received.set(rec);
                     set_update_total.set(tot);
                     set_update_downloading.set(true);
                 }
             }) as Box<dyn FnMut(_)>);
-            let _ = window.add_event_listener_with_callback("tauri-update-progress", closure.as_ref().unchecked_ref());
-            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__TAGME_UPDATE_PROGRESS_LISTENER_SET"), &JsValue::from_bool(true));
+            let _ = window.add_event_listener_with_callback(
+                "tauri-update-progress",
+                closure.as_ref().unchecked_ref(),
+            );
+            let _ = js_sys::Reflect::set(
+                &window,
+                &JsValue::from_str("__TAGME_UPDATE_PROGRESS_LISTENER_SET"),
+                &JsValue::from_bool(true),
+            );
             closure.forget();
         }
     });
 
     Effect::new(move |_| {
         let window = web_sys::window().expect("no window");
-        let flag = js_sys::Reflect::get(&window, &JsValue::from_str("__TAGME_UPDATE_COMPLETE_LISTENER_SET")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+        let flag = js_sys::Reflect::get(
+            &window,
+            &JsValue::from_str("__TAGME_UPDATE_COMPLETE_LISTENER_SET"),
+        )
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
         if !flag {
             let closure = Closure::wrap(Box::new(move |_: web_sys::Event| {
                 set_update_downloading.set(false);
             }) as Box<dyn FnMut(_)>);
-            let _ = window.add_event_listener_with_callback("tauri-update-complete", closure.as_ref().unchecked_ref());
-            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__TAGME_UPDATE_COMPLETE_LISTENER_SET"), &JsValue::from_bool(true));
+            let _ = window.add_event_listener_with_callback(
+                "tauri-update-complete",
+                closure.as_ref().unchecked_ref(),
+            );
+            let _ = js_sys::Reflect::set(
+                &window,
+                &JsValue::from_str("__TAGME_UPDATE_COMPLETE_LISTENER_SET"),
+                &JsValue::from_bool(true),
+            );
             closure.forget();
         }
     });
@@ -685,7 +601,10 @@ pub fn App() -> impl IntoView {
                     set_update_retry_in.set(Some(600));
                 }
             }) as Box<dyn FnMut()>);
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(timeout_cb.as_ref().unchecked_ref(), 8000);
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                timeout_cb.as_ref().unchecked_ref(),
+                8000,
+            );
             timeout_cb.forget();
 
             // 实际检查更新：成功则更新版本信息；失败则提示并设置重试
@@ -699,7 +618,7 @@ pub fn App() -> impl IntoView {
                     set_update_current.set(info.current);
                     set_update_latest.set(info.latest.unwrap_or_default());
                     set_update_has.set(info.has_update);
-                },
+                }
                 Err(_) => {
                     // 检查失败，提示失败并设置 10 分钟后重试
                     done.set(true);
@@ -712,7 +631,13 @@ pub fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         let window = web_sys::window().expect("no window");
-        let flag = js_sys::Reflect::get(&window, &JsValue::from_str("__TAGME_AUTO_UPDATE_INTERVAL_SET")).ok().and_then(|v| v.as_bool()).unwrap_or(false);
+        let flag = js_sys::Reflect::get(
+            &window,
+            &JsValue::from_str("__TAGME_AUTO_UPDATE_INTERVAL_SET"),
+        )
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
         if !flag {
             let set_c = set_update_current;
             let set_l = set_update_latest;
@@ -737,7 +662,10 @@ pub fn App() -> impl IntoView {
                             set_retry2.set(Some(600));
                         }
                     }) as Box<dyn FnMut()>);
-                    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(timeout_cb.as_ref().unchecked_ref(), 8000);
+                    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                        timeout_cb.as_ref().unchecked_ref(),
+                        8000,
+                    );
                     timeout_cb.forget();
 
                     // 定时检查更新逻辑
@@ -751,7 +679,7 @@ pub fn App() -> impl IntoView {
                             set_c2.set(info.current);
                             set_l2.set(info.latest.unwrap_or_default());
                             set_h2.set(info.has_update);
-                        },
+                        }
                         Err(_) => {
                             // 检查失败，设置提示与 10 分钟后重试
                             done.set(true);
@@ -761,100 +689,44 @@ pub fn App() -> impl IntoView {
                     }
                 });
             }) as Box<dyn FnMut()>);
-            let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), 600000);
-            let _ = js_sys::Reflect::set(&window, &JsValue::from_str("__TAGME_AUTO_UPDATE_INTERVAL_SET"), &JsValue::from_bool(true));
+            let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                600000,
+            );
+            let _ = js_sys::Reflect::set(
+                &window,
+                &JsValue::from_str("__TAGME_AUTO_UPDATE_INTERVAL_SET"),
+                &JsValue::from_bool(true),
+            );
             cb.forget();
         }
     });
 
     let select_directory = move |_| {
-        spawn_local(async move {
-            let path_val = invoke("select_root_directory", JsValue::NULL).await;
-            if let Ok(opt_path) = serde_wasm_bindgen::from_value::<Option<String>>(path_val) {
-                if opt_path.is_none() {
-                    web_sys::console::log_1(&"[Root] selection canceled".into());
-                    return;
-                }
-                let path = opt_path.unwrap();
-                let mut list = root_directories.get_untracked();
-                if !list.iter().any(|p| p == &path) { list.push(path.clone()); }
-                set_root_directories.set(list.clone());
-                
-                // Automatically trigger scan after selecting directory
-                set_scanning.set(true);
-                #[derive(Serialize)]
-                #[serde(rename_all = "camelCase")]
-                struct ScanFilesMultiArgs { root_paths: Vec<String> }
-                let args = ScanFilesMultiArgs { root_paths: root_directories.get_untracked() };
-                
-                // Tauri unwraps Result automatically, so expect Vec<FileListItem> directly
-                let scan_result = match serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
-                    invoke("scan_files_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await
-                ) {
-                    Ok(files) => {
-                        web_sys::console::log_1(&format!("Auto-scan success: {} files", files.len()).into());
-                        Some(files)
-                    },
-                    Err(e) => {
-                        web_sys::console::error_1(&format!("Auto-scan error: {:?}", e).into());
-                        None
-                    }
-                };
-
-                set_scanning.set(false);
-                if let Some(files) = scan_result {
-                    set_scanned_files.set(files);
-                    // Refresh DB files as well
-                    load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
-                }
-                
-                web_sys::console::log_1(&"🔍 [FRONTEND] Starting watcher for multiple roots".into());
-                spawn_local(async move {
-                    #[derive(Serialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct StartWatchingMultiArgs { root_paths: Vec<String> }
-                    let args = StartWatchingMultiArgs { root_paths: root_directories.get_untracked() };
-                    let _ = invoke("start_watching_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                });
-            }
-        });
+        handle_select_directory(
+            root_directories,
+            set_root_directories,
+            set_scanning,
+            set_scanned_files,
+            set_all_files,
+            set_displayed_files,
+            set_file_tags_map,
+            active_root_filter,
+            set_active_root_filter,
+        );
     };
 
     let scan_directory = move |_| {
-        let list = root_directories.get();
-        if !list.is_empty() {
-            set_scanning.set(true);
-            spawn_local(async move {
-                #[derive(Serialize)]
-                #[serde(rename_all = "camelCase")]
-                struct ScanFilesMultiArgs { root_paths: Vec<String> }
-                let args = ScanFilesMultiArgs { root_paths: list.clone() };
-                
-                // Tauri unwraps Result automatically, so expect Vec<FileListItem> directly
-                let result = match serde_wasm_bindgen::from_value::<Vec<FileListItem>>(
-                    invoke("scan_files_multi", serde_wasm_bindgen::to_value(&args).unwrap()).await
-                ) {
-                    Ok(files) => {
-                        web_sys::console::log_1(&format!("Scan success: {} files", files.len()).into());
-                        Some(files)
-                    },
-                    Err(e) => {
-                        web_sys::console::error_1(&format!("Scan error: {:?}", e).into());
-                        None
-                    }
-                };
-
-                set_scanning.set(false);
-                if let Some(files) = result {
-                    set_scanned_files.set(files);
-                    // Refresh DB files as well
-                    load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
-                }
-            });
-        }
+        handle_scan_directory(
+            root_directories,
+            set_scanning,
+            set_scanned_files,
+            set_all_files,
+            set_displayed_files,
+            set_file_tags_map,
+        );
     };
 
-    
     let close = move |_| {
         spawn_local(async move {
             let _ = invoke("close_window", JsValue::NULL).await;
@@ -874,11 +746,15 @@ pub fn App() -> impl IntoView {
         });
     };
 
-
-
     let toggle_tag_selection = move |tag_id: u32| {
         let mut current = selected_tag_ids.get();
-        web_sys::console::log_1(&format!("toggle_tag_selection start, tag_id={}, before={:?}", tag_id, current).into());
+        web_sys::console::log_1(
+            &format!(
+                "toggle_tag_selection start, tag_id={}, before={:?}",
+                tag_id, current
+            )
+            .into(),
+        );
         let tags = all_tags.get();
         let mut stack = vec![tag_id];
         let mut subtree_ids: Vec<u32> = Vec::new();
@@ -889,7 +765,13 @@ pub fn App() -> impl IntoView {
             }
         }
         let should_select = !current.iter().any(|&id| id == tag_id);
-        web_sys::console::log_1(&format!("should_select={}, subtree_ids={:?}", should_select, subtree_ids).into());
+        web_sys::console::log_1(
+            &format!(
+                "should_select={}, subtree_ids={:?}",
+                should_select, subtree_ids
+            )
+            .into(),
+        );
         if should_select {
             for id in &subtree_ids {
                 if !current.contains(id) {
@@ -909,14 +791,27 @@ pub fn App() -> impl IntoView {
         } else {
             use_and_logic.get()
         };
-        web_sys::console::log_1(&format!("filter_files with {} tags, use_and={}, force_or={}", current.len(), logic, force_or).into());
+        web_sys::console::log_1(
+            &format!(
+                "filter_files with {} tags, use_and={}, force_or={}",
+                current.len(),
+                logic,
+                force_or
+            )
+            .into(),
+        );
         filter_files(current, logic, set_displayed_files, all_files.get());
     };
 
     let toggle_and_or = move |_| {
         let new_logic = !use_and_logic.get();
         set_use_and_logic.set(new_logic);
-        filter_files(selected_tag_ids.get(), new_logic, set_displayed_files, all_files.get());
+        filter_files(
+            selected_tag_ids.get(),
+            new_logic,
+            set_displayed_files,
+            all_files.get(),
+        );
     };
 
     let show_all = move |_| {
@@ -953,7 +848,11 @@ pub fn App() -> impl IntoView {
         let parent = new_tag_parent.get();
         if !name.is_empty() {
             spawn_local(async move {
-                let args = CreateTagArgs { name, parent_id: parent, color: None };
+                let args = CreateTagArgs {
+                    name,
+                    parent_id: parent,
+                    color: None,
+                };
                 let _ = invoke("create_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
                 load_tags(set_all_tags).await;
                 set_show_add_tag_dialog.set(false);
@@ -1128,7 +1027,7 @@ pub fn App() -> impl IntoView {
                 <button on:click=scan_directory disabled=move || root_directories.get().is_empty()>
                     {move || if scanning.get() { "Scanning..." } else { "Scan Files" }}
                 </button>
-                
+
                 <button on:mousedown={move |_| {
                         web_sys::console::log_1(&"[UI] Clear DB Files mousedown".into());
                     }}
@@ -1194,7 +1093,7 @@ pub fn App() -> impl IntoView {
                             }>
                                 "Hide AI"
                             </button>
-                        
+
                         </div>
                     </div>
                     <GroupedFileList
@@ -1275,7 +1174,7 @@ pub fn App() -> impl IntoView {
                         let files = selected_file_paths.get();
                         let is_empty = files.is_empty();
                         let count = files.len();
-                        
+
                         let header = if is_empty {
                             "No files selected".to_string()
                         } else if count == 1 {
@@ -1302,7 +1201,7 @@ pub fn App() -> impl IntoView {
                                                         spawn_local(async move {
                                                             let args = CreateTagArgs { name: name.clone(), parent_id: None, color: None };
                                                             let result = invoke("create_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                            
+
                                                             if let Ok(tid) = serde_wasm_bindgen::from_value::<u32>(result) {
                                                                 for p in &paths {
                                                                     let pc = p.clone();
@@ -1326,17 +1225,17 @@ pub fn App() -> impl IntoView {
                                             children=move |t| {
                                                 let tid = t.id;
                                                 let tname = t.name.clone();
-                                                
+
                                                 // Check if all selected files have this tag
                                                 let is_checked = move || {
                                                     let files = selected_file_paths.get();
                                                     if files.is_empty() {
                                                         return false;
                                                     }
-                                                    
+
                                                     let tags_map = file_tags_map.get();
                                                     let all_files_info = all_files.get();
-                                                    
+
                                                     // Check if all selected files have this tag
                                                     files.iter().all(|file_path| {
                                                         // Find file by path
@@ -1352,7 +1251,7 @@ pub fn App() -> impl IntoView {
                                                         }
                                                     })
                                                 };
-                                                
+
                                                 view! {
                                                     <label class="tag-item">
                                                         <input
@@ -1361,7 +1260,7 @@ pub fn App() -> impl IntoView {
                                                             on:change=move |e| {
                                                                 let checked = event_target_checked(&e);
                                                                 let ps = selected_file_paths.get();
-                                                                
+
                                                                 if checked {
                                                                     // Add tag to all selected file paths (DB entry will be created if missing)
                                                                     for p in &ps {
@@ -1384,7 +1283,7 @@ pub fn App() -> impl IntoView {
                                                                         }
                                                                     }
                                                                 }
-                                                                
+
                                                                 // Reload only the affected files immediately
                                                                 spawn_local(async move {
                                                                     load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
@@ -1575,854 +1474,9 @@ pub fn App() -> impl IntoView {
     }
 }
 
-#[component]
-fn TagTree(
-    tags: ReadSignal<Vec<TagInfo>>,
-    selected_tag_ids: ReadSignal<Vec<u32>>,
-    set_selected_tag_ids: WriteSignal<Vec<u32>>,
-    use_and_logic: ReadSignal<bool>,
-    set_displayed_files: WriteSignal<Vec<FileInfo>>,
-    all_files: ReadSignal<Vec<FileInfo>>,
-    set_show_delete_tag_confirm: WriteSignal<bool>,
-    set_delete_target_tag_id: WriteSignal<Option<u32>>,
-    on_toggle: impl Fn(u32) + 'static + Copy + Send,
-    _set_all_tags: WriteSignal<Vec<TagInfo>>,
-    dragging_tag_id: ReadSignal<Option<u32>>,
-    set_dragging_tag_id: WriteSignal<Option<u32>>,
-    drop_target_tag_id: ReadSignal<Option<u32>>,
-    set_drop_target_tag_id: WriteSignal<Option<u32>>,
-    drop_position: ReadSignal<f64>,
-    set_drop_position: WriteSignal<f64>,
-    set_reload_tags_trigger: WriteSignal<u32>,
-    drag_just_ended: ReadSignal<bool>,
-    set_drag_just_ended: WriteSignal<bool>,
-    dnd: leptos_dragdrop::DndSignals,
-) -> impl IntoView {
-    let root_tags = move || {
-        tags.get()
-            .into_iter()
-            .filter(|t| t.parent_id.is_none())
-            .collect::<Vec<_>>()
-    };
-
-    view! {
-        <div class="tag-tree">
-            <For
-                each=root_tags
-                key=|tag| tag.id
-                children=move |tag| {
-                    view! {
-                        <TagNode
-                            tag=tag
-                            all_tags=tags
-                            selected_tag_ids=selected_tag_ids
-                            set_selected_tag_ids=set_selected_tag_ids
-                            use_and_logic=use_and_logic
-                            set_displayed_files=set_displayed_files
-                            all_files=all_files
-                            set_show_delete_tag_confirm=set_show_delete_tag_confirm
-                            set_delete_target_tag_id=set_delete_target_tag_id
-                            on_toggle=on_toggle
-                            level=0
-                            dragging_tag_id=dragging_tag_id
-                            set_dragging_tag_id=set_dragging_tag_id
-                            drop_target_tag_id=drop_target_tag_id
-                            set_drop_target_tag_id=set_drop_target_tag_id
-                            drop_position=drop_position
-                            set_drop_position=set_drop_position
-                        set_reload_tags_trigger=set_reload_tags_trigger
-                        drag_just_ended=drag_just_ended
-                        set_drag_just_ended=set_drag_just_ended
-                        />
-                    }
-                }
-            />
-        </div>
-    }
-}
-
-#[component]
-fn TagNode(
-    tag: TagInfo,
-    all_tags: ReadSignal<Vec<TagInfo>>,
-    selected_tag_ids: ReadSignal<Vec<u32>>,
-    set_selected_tag_ids: WriteSignal<Vec<u32>>,
-    use_and_logic: ReadSignal<bool>,
-    set_displayed_files: WriteSignal<Vec<FileInfo>>,
-    all_files: ReadSignal<Vec<FileInfo>>,
-    set_show_delete_tag_confirm: WriteSignal<bool>,
-    set_delete_target_tag_id: WriteSignal<Option<u32>>,
-    on_toggle: impl Fn(u32) + 'static + Copy + Send,
-    level: usize,
-    dragging_tag_id: ReadSignal<Option<u32>>,
-    set_dragging_tag_id: WriteSignal<Option<u32>>,
-    drop_target_tag_id: ReadSignal<Option<u32>>,
-    set_drop_target_tag_id: WriteSignal<Option<u32>>,
-    drop_position: ReadSignal<f64>,
-    set_drop_position: WriteSignal<f64>,
-    set_reload_tags_trigger: WriteSignal<u32>,
-    drag_just_ended: ReadSignal<bool>,
-    set_drag_just_ended: WriteSignal<bool>,
-) -> AnyView {
-    let dnd = expect_context::<leptos_dragdrop::DndSignals>();
-    let tag_id = tag.id;
-    let children = move || {
-        all_tags.get()
-            .into_iter()
-            .filter(move |t| t.parent_id == Some(tag_id))
-            .collect::<Vec<_>>()
-    };
-
-    let is_selected = move || selected_tag_ids.get().contains(&tag_id);
-    let has_children = move || !children().is_empty();
-    
-    let _is_dragging = move || dragging_tag_id.get() == Some(tag_id);
-    let _is_drop_target = move || drop_target_tag_id.get() == Some(tag_id);
-
-    // Mouse down - start drag
-    let on_mousedown = leptos_dragdrop::make_on_mousedown(dnd.clone(), tag_id);
-
-    // Mouse enter - track potential drop target
-    let update_position = move |ev: &web_sys::MouseEvent| {
-        if dragging_tag_id.get_untracked().is_some() {
-            // Calculate relative position (0.0 = top, 1.0 = bottom)
-            if let Some(target) = ev.current_target() {
-                if let Some(element) = target.dyn_ref::<web_sys::HtmlElement>() {
-                    let rect = element.get_bounding_client_rect();
-                    let y = ev.client_y() as f64;
-                    let top = rect.top();
-                    let height = rect.height();
-                    
-                    if height > 0.0 {
-                        let relative_y = ((y - top) / height).max(0.0).min(1.0);
-                        let nodes: Vec<leptos_dragdrop::Node> = all_tags
-                            .get_untracked()
-                            .iter()
-                            .map(|t| leptos_dragdrop::Node { id: t.id, parent_id: t.parent_id, position: t.position })
-                            .collect();
-                        let current = leptos_dragdrop::Node { id: tag_id, parent_id: tag.parent_id, position: tag.position };
-                        let (target_id_effective, pos_effective) = leptos_dragdrop::unify_hover_target(&nodes, current, relative_y);
-                        set_drop_target_tag_id.set(Some(target_id_effective));
-                        set_drop_position.set(pos_effective);
-                        web_sys::console::log_1(&format!("📍 Tag {} -> target {} position: {:.2}", tag_id, target_id_effective, pos_effective).into());
-                    }
-                }
-            }
-        }
-    };
-
-    let get_nodes = move || {
-        all_tags.get_untracked().iter().map(|t| leptos_dragdrop::Node { id: t.id, parent_id: t.parent_id, position: t.position }).collect::<Vec<_>>()
-    };
-    let current_node = leptos_dragdrop::Node { id: tag_id, parent_id: tag.parent_id, position: tag.position };
-    let on_mouseenter = leptos_dragdrop::make_on_mousemove(dnd.clone(), current_node, get_nodes);
-    let on_mousemove = leptos_dragdrop::make_on_mousemove(dnd.clone(), current_node, get_nodes);
-
-    // Visual feedback based on drag state
-    let node_class = move || {
-        let mut classes = vec![];
-        
-        if dragging_tag_id.get() == Some(tag_id) {
-            classes.push("dragging");
-        }
-        
-        if drop_target_tag_id.get() == Some(tag_id) {
-            let pos = drop_position.get();
-            if pos < 0.25 {
-                classes.push("drop-before");
-            } else if pos > 0.75 {
-                classes.push("drop-after");
-            } else {
-                classes.push("drop-child");
-            }
-        }
-        
-        classes.join(" ")
-    };
-
-    view! {
-        <div 
-            class=move || format!("tag-node {}", node_class())
-            style=format!("margin-left: {}px", level * 20)
-        >
-            <label 
-                class="tag-label"
-                on:mousedown=on_mousedown
-                on:mouseenter=on_mouseenter
-                on:mousemove=on_mousemove
-                on:click=leptos_dragdrop::make_label_click_guard(dnd.clone())
-            >
-                <input
-                    type="checkbox"
-                    prop:checked=is_selected
-                    on:change=leptos_dragdrop::make_checkbox_change_guard(dnd.clone(), on_toggle, tag_id)
-                    on:click=leptos_dragdrop::make_checkbox_click_guard(dnd.clone())
-                />
-                <span class="tag-name" style=move || tag.color.clone().map(|c| format!("color: {}", c)).unwrap_or_default()>
-                    {tag.name.clone()}
-                </span>
-                <button
-                    class="tag-delete"
-                    title="Delete Tag"
-                    style="margin-left:6px; border:none; background:transparent; color:#c00; cursor:pointer;"
-                    on:mousedown=move |ev: web_sys::MouseEvent| {
-                        ev.stop_propagation();
-                        ev.prevent_default();
-                    }
-                    on:click=move |ev: web_sys::MouseEvent| {
-                        ev.stop_propagation();
-                        ev.prevent_default();
-                        set_delete_target_tag_id.set(Some(tag_id));
-                        set_show_delete_tag_confirm.set(true);
-                    }
-                >"×"</button>
-            </label>
-            {move || has_children().then(|| view! {
-                <div class="tag-children">
-                    <For
-                        each=children
-                        key=|t| t.id
-                        children=move |child| {
-                            view! {
-                                <TagNode
-                                    tag=child
-                                    all_tags=all_tags
-                                    selected_tag_ids=selected_tag_ids
-                                    set_selected_tag_ids=set_selected_tag_ids
-                                    use_and_logic=use_and_logic
-                                    set_displayed_files=set_displayed_files
-                                    all_files=all_files
-                                    set_show_delete_tag_confirm=set_show_delete_tag_confirm
-                                    set_delete_target_tag_id=set_delete_target_tag_id
-                                    on_toggle=on_toggle
-                                    level=level + 1
-                                    dragging_tag_id=dragging_tag_id
-                                    set_dragging_tag_id=set_dragging_tag_id
-                                    drop_target_tag_id=drop_target_tag_id
-                                    set_drop_target_tag_id=set_drop_target_tag_id
-                                    drop_position=drop_position
-                                    set_drop_position=set_drop_position
-                                set_reload_tags_trigger=set_reload_tags_trigger
-                                drag_just_ended=drag_just_ended
-                                set_drag_just_ended=set_drag_just_ended
-                                />
-                            }
-                        }
-                    />
-                </div>
-            })}
-        </div>
-    }.into_any()
-}
-
-#[component]
-fn FileList(
-    files: impl Fn() -> Vec<DisplayFile> + 'static + Send,
-    selected_file_paths: ReadSignal<Vec<String>>,
-    on_toggle: impl Fn(String) + 'static + Copy + Send,
-    sort_column: ReadSignal<SortColumn>,
-    sort_direction: ReadSignal<SortDirection>,
-    on_sort: impl Fn(SortColumn) + 'static + Copy + Send,
-) -> impl IntoView {
-    let sort_indicator = move |col: SortColumn| {
-        if sort_column.get() == col {
-            match sort_direction.get() {
-                SortDirection::Asc => " ▲",
-                SortDirection::Desc => " ▼",
-            }
-        } else {
-            ""
-        }
-    };
-
-    view! {
-        <div class="file-list">
-            <table>
-                <thead>
-                    <tr>
-                        <th></th>
-                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Name)>
-                            "File Name" {move || sort_indicator(SortColumn::Name)}
-                        </th>
-                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Type)>
-                            "Type" {move || sort_indicator(SortColumn::Type)}
-                        </th>
-                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Size)>
-                            "Size" {move || sort_indicator(SortColumn::Size)}
-                        </th>
-                        <th class="sortable" on:click=move |_| on_sort(SortColumn::Date)>
-                            "Modified" {move || sort_indicator(SortColumn::Date)}
-                        </th>
-                        <th>"Tags"</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <For
-                        each=files
-                        key=|file| file.path.clone()
-                        children=move |file| {
-                            let file_path = file.path.clone();
-                            let file_path_for_toggle = file_path.clone();
-                            let file_path_for_class = file_path.clone();
-                            let file_path_for_checked = file_path.clone();
-                            
-                            let file_path_for_dblclick = file_path.clone();
-                            
-                                    let tags_check = file.tags.clone();
-                                    let tags_loop = file.tags.clone();
-                                    
-                                    view! {
-                                        <tr
-                                            class:selected=move || selected_file_paths.get().contains(&file_path_for_class)
-                                            on:dblclick=move |_| {
-                                                let path = file_path_for_dblclick.clone();
-                                                spawn_local(async move {
-                                                    let args = OpenFileArgs { path };
-                                                    let _ = invoke("open_file", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                });
-                                            }
-                                        >
-                                            <td on:dblclick=|e| e.stop_propagation()>
-                                                <input
-                                                    type="checkbox"
-                                                    checked=move || selected_file_paths.get().contains(&file_path_for_checked)
-                                                    on:change=move |_| on_toggle(file_path_for_toggle.clone())
-                                                />
-                                            </td>
-                                            <td class="file-path" title=file.path.clone()>
-                                                {if file.is_directory { "📁 " } else { "" }}
-                                                {file.name.clone()}
-                                            </td>
-                                            <td>
-                                                {if file.is_directory { "Folder".to_string() } else { file.extension.clone() }}
-                                            </td>
-                                            <td>{format_file_size(file.size_bytes)}</td>
-                                            <td>{format_timestamp(file.last_modified)}</td>
-                                            <td class="file-tags">
-                                                <Show
-                                                    when=move || !tags_check.is_empty()
-                                                    fallback=|| view! { <span class="not-in-db">"Not tagged"</span> }
-                                                >
-                                            {
-                                                let tags_inner = tags_loop.clone();
-                                                view! {
-                                                    <For
-                                                        each=move || tags_inner.clone()
-                                                        key=|tag| tag.id
-                                                        children=move |tag| {
-                                                            view! {
-                                                                <span class="tag-badge" style=move || tag.color.clone().map(|c| format!("background-color: {}", c)).unwrap_or_default()>
-                                                                    {tag.name.clone()}
-                                                                </span>
-                                                            }
-                                                        }
-                                                    />
-                                                }
-                                            }
-                                                </Show>
-                                            </td>
-                                        </tr>
-                                    }
-                        }
-                    />
-                </tbody>
-            </table>
-        </div>
-    }
-}
-
-#[component]
-fn GroupedFileList(
-    files: impl Fn() -> Vec<DisplayFile> + 'static + Send,
-    roots: ReadSignal<Vec<String>>,
-    active_root_filter: ReadSignal<Option<String>>,
-    selected_file_paths: ReadSignal<Vec<String>>,
-    on_toggle: impl Fn(String) + 'static + Copy + Send + Sync,
-    sort_column: ReadSignal<SortColumn>,
-    sort_direction: ReadSignal<SortDirection>,
-    on_sort: impl Fn(SortColumn) + 'static + Copy + Send + Sync,
-    set_selected_file_paths: WriteSignal<Vec<String>>,
-    last_selected_file_path: ReadSignal<Option<String>>,
-    set_last_selected_file_path: WriteSignal<Option<String>>,
-    _recommended_map: ReadSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
-    recommended_info_map: ReadSignal<std::collections::HashMap<String, Vec<RecommendItem>>>,
-    show_recommended: ReadSignal<bool>,
-    all_tags: ReadSignal<Vec<TagInfo>>,
-    set_all_files: WriteSignal<Vec<FileInfo>>,
-    set_displayed_files: WriteSignal<Vec<FileInfo>>,
-    set_file_tags_map: WriteSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
-) -> impl IntoView {
-    fn is_under_root(file_path: &str, root: &str) -> bool {
-        let mut r = root.replace('/', "\\").to_lowercase();
-        if !r.ends_with('\\') { r.push('\\'); }
-        let f = file_path.replace('/', "\\").to_lowercase();
-        f.starts_with(&r) || f == root.replace('/', "\\").to_lowercase()
-    }
-    let sort_indicator = move |col: SortColumn| {
-        if sort_column.get() == col {
-            match sort_direction.get() {
-                SortDirection::Asc => " ▲",
-                SortDirection::Desc => " ▼",
-            }
-        } else {
-            ""
-        }
-    };
-
-    view! {
-        <div class="file-list">
-            {move || {
-                let all = files();
-                let roots_vec = roots.get();
-                let filter = active_root_filter.get();
-                let groups: Vec<(String, Vec<DisplayFile>)> = roots_vec.into_iter().map(|r| {
-                    if let Some(ref f) = filter {
-                        if &r != f { return (r.clone(), Vec::<DisplayFile>::new()); }
-                    }
-                    let v = all
-                        .iter()
-                        .cloned()
-                        .filter(|f| is_under_root(&f.path, &r))
-                        .collect::<Vec<_>>();
-                    (r, v)
-                }).collect();
-
-                let total: usize = groups.iter().map(|(_, v)| v.len()).sum();
-
-                view! {
-                    <Show
-                        when=move || total == 0
-                        fallback=move || {
-                            let groups_clone = groups.clone();
-                            view! {
-                                <div>
-                                    <For
-                                        each=move || groups_clone.clone()
-                                        key=|grp: &(String, Vec<DisplayFile>)| grp.0.clone()
-                                        children=move |grp: (String, Vec<DisplayFile>)| {
-                                            let r = grp.0.clone();
-                                            let group_files = grp.1.clone();
-                                            let group_files_value = group_files.clone();
-                                            let group_paths = std::sync::Arc::new(group_files.iter().map(|f| f.path.clone()).collect::<Vec<String>>());
-                                            let group_files_for_empty = group_files.clone();
-                                            view! {
-                                                <div class="file-group">
-                                                    <div class="group-header">{r.clone()}</div>
-                                                    <table>
-                                                        <thead>
-                                                            <tr>
-                                                                <th></th>
-                                                                <th class="sortable" on:click=move |_| on_sort(SortColumn::Name)>
-                                                                    "File Name" {move || sort_indicator(SortColumn::Name)}
-                                                                </th>
-                                                                <th class="sortable" on:click=move |_| on_sort(SortColumn::Type)>
-                                                                    "Type" {move || sort_indicator(SortColumn::Type)}
-                                                                </th>
-                                                                <th class="sortable" on:click=move |_| on_sort(SortColumn::Size)>
-                                                                    "Size" {move || sort_indicator(SortColumn::Size)}
-                                                                </th>
-                                                                <th class="sortable" on:click=move |_| on_sort(SortColumn::Date)>
-                                                                    "Modified" {move || sort_indicator(SortColumn::Date)}
-                                                                </th>
-                                                                <th>"Tags"</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody>
-                                                            <For
-                                                                each=move || group_files_value.clone()
-                                                                key=|file| file.path.clone()
-                                                                children=move |file| {
-                                                                    let file_path = file.path.clone();
-                                                                    let file_path_for_toggle = file_path.clone();
-                                                                    let file_path_arc = std::sync::Arc::new(file_path_for_toggle.clone());
-                                                                    let file_path_for_class = file_path.clone();
-                                                                    let file_path_for_checked = file_path.clone();
-                                                                    let file_path_for_dblclick = file_path.clone();
-                                                                    let tags_check = file.tags.clone();
-                                                                    let tags_loop = file.tags.clone();
-                                                                    view! {
-                                                                        <tr
-                                                                            class:selected=move || selected_file_paths.get().contains(&file_path_for_class)
-                                                                            on:dblclick=move |_| {
-                                                                                let path = file_path_for_dblclick.clone();
-                                                                                spawn_local(async move {
-                                                                                    let args = OpenFileArgs { path };
-                                                                                    let _ = invoke("open_file", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                                                });
-                                                                            }
-                                                                        >
-                                                                            <td on:dblclick=|e| e.stop_propagation()>
-                                                                                    <input
-                                                                                        type="checkbox"
-                                                                                        prop:checked=move || selected_file_paths.get().contains(&file_path_for_checked)
-                                                                                        on:click={
-                                                                                            let value = group_paths.clone();
-                                                                                            let file_path_for_toggle_click = file_path_for_toggle.clone();
-                                                                                            move |ev: web_sys::MouseEvent| {
-                                                                                                let shift = ev.shift_key();
-                                                                                                if shift {
-                                                                                                    let anchor = last_selected_file_path.get();
-                                                                                                let current = file_path_for_toggle_click.clone();
-                                                                                                    let paths = (*value).clone();
-                                                                                                    if let Some(a) = anchor {
-                                                                                                        let i1 = paths.iter().position(|p| p == &a);
-                                                                                                        let i2 = paths.iter().position(|p| p == &current);
-                                                                                                        if let (Some(s1), Some(s2)) = (i1, i2) {
-                                                                                                            let (s, e) = if s1 <= s2 { (s1, s2) } else { (s2, s1) };
-                                                                                                            let range = paths[s..=e].to_vec();
-                                                                                                            set_selected_file_paths.set(range);
-                                                                                                        } else {
-                                                                                                            set_selected_file_paths.set(vec![current.clone()]);
-                                                                                                        }
-                                                                                                    } else {
-                                                                                                        set_selected_file_paths.set(vec![current.clone()]);
-                                                                                                    }
-                                                                                                set_last_selected_file_path.set(Some(current));
-                                                                                                } else {
-                                                                                                on_toggle(file_path_for_toggle_click.clone());
-                                                                                                set_last_selected_file_path.set(Some(file_path_for_toggle_click.clone()));
-                                                                                                }
-                                                                                            }
-                                                                                        }
-                                                                                    />
-                                                                            </td>
-                                                                            <td class="file-path" title=file.path.clone()>
-                                                                                {if file.is_directory { "📁 " } else { "" }}
-                                                                                {file.name.clone()}
-                                                                            </td>
-                                                                            <td>
-                                                                                {if file.is_directory { "Folder".to_string() } else { file.extension.clone() }}
-                                                                            </td>
-                                                                            <td>{format_file_size(file.size_bytes)}</td>
-                                                                            <td>{format_timestamp(file.last_modified)}</td>
-                                                                            <td class="file-tags">
-                                                                                <Show
-                                                                                    when=move || !tags_check.is_empty()
-                                                                                    fallback=|| view! { <span class="not-in-db">"Not tagged"</span> }
-                                                                                >
-                                                                                    {
-                                                                                        let tags_inner = tags_loop.clone();
-                                                                                        view! {
-                                                                                            <For
-                                                                                                each=move || tags_inner.clone()
-                                                                                                key=|tag| tag.id
-                                                                                                children=move |tag| {
-                                                                                                    view! {
-                                                                                                        <span class="tag-badge" style=move || tag.color.clone().map(|c| format!("background-color: {}", c)).unwrap_or_default()>
-                                                                                                            {tag.name.clone()}
-                                                                                                        </span>
-                                                                                                    }
-                                                                                                }
-                                                                                            />
-                                                                                        }
-                                                                                    }
-                                                                                </Show>
-                                                                                <Show when=move || show_recommended.get() fallback=|| view!{}>
-                                                                                {
-                                                                                    let fp_arc_for_recs = file_path_arc.clone();
-                                                                                    let file_path_key_for_recs = file_path_for_toggle.clone();
-                                                                                    view! {
-                                                                                        <div style="margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
-                                                                                            <For
-                                                                                                each=move || {
-                                                                                                    recommended_info_map.get().get(&file_path_key_for_recs).cloned().unwrap_or_default()
-                                                                                                }
-                                                                                                key=|ri| ri.name.clone()
-                                                                                                children=move |ri: RecommendItem| {
-                                                                                                    let fp_arc_local = fp_arc_for_recs.clone();
-                                                                                                    let label = if ri.source == "onnx" { format!("{} ·AI", ri.name) } else if ri.source == "llm" { format!("{} ·LLM", ri.name) } else if ri.source == "llm-vision" { format!("{} ·VL", ri.name) } else { ri.name.clone() };
-                                                                                                    let title_attr = format!("score: {:.3}", ri.score);
-                                                                                                    let tname = ri.name.clone();
-                                                                                                    view! {
-                                                                                                        <button style="background:#eee; color:#555; border:none; border-radius:10px; padding:2px 6px; cursor:pointer;"
-                                                                                                            title=title_attr
-                                                                                                            on:click=move |_| {
-                                                                                                                let fp = (*fp_arc_local).clone();
-                                                                                                                // lookup tag id by name
-                                                                                                                let mut found: Option<u32> = None;
-                                                                                                                for tg in all_tags.get().iter() { if tg.name == tname { found = Some(tg.id); break; } }
-                                                                                                                if let Some(tid) = found {
-                                                                                                                    let args = AddFileTagArgs { file_path: fp.clone(), tag_id: tid };
-                                                                                                                    spawn_local(async move {
-                                                                                                                        let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                                                                                        // Reload to reflect DB enrollment and new tag
-                                                                                                                        load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
-                                                                                                                    });
-                                                                                                                }
-                                                                                                            }
-                                                                                                        >{label}</button>
-                                                                                                    }
-                                                                                                }
-                                                                                            />
-                                                                                        </div>
-                                                                                    }
-                                                                                }
-                                                                                </Show>
-                                                                            </td>
-                                                                        </tr>
-                                                                    }
-                                                                }
-                                                            />
-                                                            {move || if group_files_for_empty.is_empty() { Some(view! { <tr><td colspan="6"><em>"No files in this root"</em></td></tr> }) } else { None }}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                            }
-                                        }
-                                    />
-                                </div>
-                            }
-                        }
-                    >
-                        {
-                            let all_clone = all.clone();
-                            let all_value = all_clone.clone();
-                            let all_paths = std::sync::Arc::new(all_clone.iter().map(|f| f.path.clone()).collect::<Vec<String>>());
-                            view! {
-                                <div>
-                                <table>
-                                    <thead>
-                                        <tr>
-                                            <th></th>
-                                            <th class="sortable" on:click=move |_| on_sort(SortColumn::Name)>
-                                                "File Name" {move || sort_indicator(SortColumn::Name)}
-                                            </th>
-                                            <th class="sortable" on:click=move |_| on_sort(SortColumn::Type)>
-                                                "Type" {move || sort_indicator(SortColumn::Type)}
-                                            </th>
-                                            <th class="sortable" on:click=move |_| on_sort(SortColumn::Size)>
-                                                "Size" {move || sort_indicator(SortColumn::Size)}
-                                            </th>
-                                            <th class="sortable" on:click=move |_| on_sort(SortColumn::Date)>
-                                                "Modified" {move || sort_indicator(SortColumn::Date)}
-                                            </th>
-                                            <th>"Tags"</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        <For
-                                            each=move || all_value.clone()
-                                            key=|file| file.path.clone()
-                                            children=move |file| {
-                                                let file_path = file.path.clone();
-                                                let file_path_for_toggle = file_path.clone();
-                                                let file_path_arc2 = std::sync::Arc::new(file_path_for_toggle.clone());
-                                                let file_path_for_class = file_path.clone();
-                                                let file_path_for_checked = file_path.clone();
-                                                let file_path_for_dblclick = file_path.clone();
-                                                let tags_check = file.tags.clone();
-                                                let tags_loop = file.tags.clone();
-                                                view! {
-                                                    <tr
-                                                        class:selected=move || selected_file_paths.get().contains(&file_path_for_class)
-                                                        on:dblclick=move |_| {
-                                                            let path = file_path_for_dblclick.clone();
-                                                            spawn_local(async move {
-                                                                let args = OpenFileArgs { path };
-                                                                let _ = invoke("open_file", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                            });
-                                                        }
-                                                    >
-                                                        <td on:dblclick=|e| e.stop_propagation()>
-                                                            <input
-                                                                type="checkbox"
-                                                                prop:checked=move || selected_file_paths.get().contains(&file_path_for_checked)
-                                                                on:click={
-                                                                    let value = all_paths.clone();
-                                                                    let file_path_for_toggle_click2 = file_path_for_toggle.clone();
-                                                                    move |ev: web_sys::MouseEvent| {
-                                                                        let shift = ev.shift_key();
-                                                                        if shift {
-                                                                            let anchor = last_selected_file_path.get();
-                                                                            let current = file_path_for_toggle_click2.clone();
-                                                                            let paths = (*value).clone();
-                                                                            if let Some(a) = anchor {
-                                                                                let i1 = paths.iter().position(|p| p == &a);
-                                                                                let i2 = paths.iter().position(|p| p == &current);
-                                                                                if let (Some(s1), Some(s2)) = (i1, i2) {
-                                                                                    let (s, e) = if s1 <= s2 { (s1, s2) } else { (s2, s1) };
-                                                                                    let range = paths[s..=e].to_vec();
-                                                                                    set_selected_file_paths.set(range);
-                                                                                } else {
-                                                                                    set_selected_file_paths.set(vec![current.clone()]);
-                                                                                }
-                                                                            } else {
-                                                                                set_selected_file_paths.set(vec![current.clone()]);
-                                                                            }
-                                                                            set_last_selected_file_path.set(Some(current));
-                                                                        } else {
-                                                                            on_toggle(file_path_for_toggle_click2.clone());
-                                                                            set_last_selected_file_path.set(Some(file_path_for_toggle_click2.clone()));
-                                                                        }
-                                                                    }
-                                                                }
-                                                            />
-                                                        </td>
-                                                        <td class="file-path" title=file.path.clone()>
-                                                            {if file.is_directory { "📁 " } else { "" }}
-                                                            {file.name.clone()}
-                                                        </td>
-                                                        <td>
-                                                            {if file.is_directory { "Folder".to_string() } else { file.extension.clone() }}
-                                                        </td>
-                                                        <td>{format_file_size(file.size_bytes)}</td>
-                                                        <td>{format_timestamp(file.last_modified)}</td>
-                                                        <td class="file-tags">
-                                                            <Show
-                                                                when=move || !tags_check.is_empty()
-                                                                fallback=|| view! { <span class="not-in-db">"Not tagged"</span> }
-                                                            >
-                                                                {
-                                                                    let tags_inner = tags_loop.clone();
-                                                                    view! {
-                                                                        <For
-                                                                            each=move || tags_inner.clone()
-                                                                            key=|tag| tag.id
-                                                                            children=move |tag| {
-                                                                                view! {
-                                                                                    <span class="tag-badge" style=move || tag.color.clone().map(|c| format!("background-color: {}", c)).unwrap_or_default()>
-                                                                                        {tag.name.clone()}
-                                                                                    </span>
-                                                                                }
-                                                                            }
-                                                                        />
-                                                                    }
-                                                                }
-                                                            </Show>
-                                                            <Show when=move || show_recommended.get() fallback=|| view!{}>
-                                                            {
-                                                                let fp_arc_for_recs = file_path_arc2.clone();
-                                                                let file_path_key_for_recs2 = file_path_for_toggle.clone();
-                                                                view! {
-                                                                    <div style="margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
-                                                                        <For
-                                                                            each=move || {
-                                                                                recommended_info_map.get().get(&file_path_key_for_recs2).cloned().unwrap_or_default()
-                                                                            }
-                                                                            key=|ri| ri.name.clone()
-                                                                            children=move |ri: RecommendItem| {
-                                                                                let fp_arc_local = fp_arc_for_recs.clone();
-                                                                                let label = if ri.source == "onnx" { format!("{} ·AI", ri.name) } else if ri.source == "llm" { format!("{} ·LLM", ri.name) } else if ri.source == "llm-vision" { format!("{} ·VL", ri.name) } else { ri.name.clone() };
-                                                                                let title_attr = format!("score: {:.3}", ri.score);
-                                                                                let tname = ri.name.clone();
-                                                                                view! {
-                                                                                    <button style="background:#eee; color:#555; border:none; border-radius:10px; padding:2px 6px; cursor:pointer;"
-                                                                                        title=title_attr
-                                                                                        on:click=move |_| {
-                                                                                            let fp = (*fp_arc_local).clone();
-                                                                                            let mut found: Option<u32> = None;
-                                                                                            for tg in all_tags.get().iter() { if tg.name == tname { found = Some(tg.id); break; } }
-                                                                                            if let Some(tid) = found {
-                                                                                                let args = AddFileTagArgs { file_path: fp.clone(), tag_id: tid };
-                                                                                                spawn_local(async move {
-                                                                                                    let _ = invoke("add_file_tag", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                                                                    load_all_files(set_all_files, set_displayed_files, set_file_tags_map).await;
-                                                                                                });
-                                                                                            }
-                                                                                        }
-                                                                                    >{label}</button>
-                                                                                }
-                                                                            }
-                                                                        />
-                                                                    </div>
-                                                                }
-                                                            }
-                                                            </Show>
-                                                        </td>
-                                                    </tr>
-                                                }
-                                            }
-                                        />
-                                    </tbody>
-                                </table>
-                                </div>
-                            }
-                        }
-                    </Show>
-                }
-            }}
-        </div>
-    }
-}
-
-// Helper functions
-async fn load_tags(set_all_tags: WriteSignal<Vec<TagInfo>>) {
-    web_sys::console::log_1(&"Loading tags...".into());
-    let tags_val = invoke("get_all_tags", JsValue::NULL).await;
-
-    match serde_wasm_bindgen::from_value::<Vec<TagInfo>>(tags_val) {
-        Ok(tags) => {
-            web_sys::console::log_1(&format!("Loaded {} tags", tags.len()).into());
-            for tag in &tags {
-                web_sys::console::log_1(&format!("   Frontend - Tag: {}, ID: {}, Parent: {:?}, Pos: {}",
-                    tag.name, tag.id, tag.parent_id, tag.position).into());
-            }
-            set_all_tags.set(tags);
-        },
-        Err(e) => {
-            web_sys::console::error_1(&format!("Error deserializing tags: {:?}", e).into());
-        }
-    }
-}
-
-async fn load_all_files(
-    set_all_files: WriteSignal<Vec<FileInfo>>,
-    set_displayed_files: WriteSignal<Vec<FileInfo>>,
-    set_file_tags_map: WriteSignal<std::collections::HashMap<u32, Vec<TagInfo>>>,
-) {
-    let files_val = invoke("get_all_files", JsValue::NULL).await;
-    let files = match serde_wasm_bindgen::from_value::<Vec<FileInfo>>(files_val) {
-        Ok(f) => f,
-        Err(e) => {
-            web_sys::console::error_1(&format!("Error loading files: {:?}", e).into());
-            return;
-        }
-    };
-    
-    // Load tags for each file
-    let mut tags_map = std::collections::HashMap::new();
-    for file in &files {
-        let file_id = file.id;
-        let args = GetFileTagsArgs { file_id };
-        let tags_val = invoke("get_file_tags", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-        
-        if let Ok(tags) = serde_wasm_bindgen::from_value::<Vec<TagInfo>>(tags_val) {
-            tags_map.insert(file_id, tags);
-        }
-    }
-    
-    set_file_tags_map.set(tags_map);
-    set_all_files.set(files.clone());
-    set_displayed_files.set(files);
-}
-
-fn filter_files(
-    tag_ids: Vec<u32>,
-    use_and: bool,
-    set_displayed_files: WriteSignal<Vec<FileInfo>>,
-    all_files: Vec<FileInfo>,
-) {
-    if tag_ids.is_empty() {
-        set_displayed_files.set(all_files);
-        return;
-    }
-
-    spawn_local(async move {
-        web_sys::console::log_1(&format!("filter_files start, tag_ids={:?}, use_and={}", tag_ids, use_and).into());
-        let args = FilterFilesByTagsArgs {
-            tag_ids,
-            use_and_logic: use_and,
-        };
-        let result_val = invoke("filter_files_by_tags", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-        
-        if let Ok(files) = serde_wasm_bindgen::from_value::<Vec<FileInfo>>(result_val) {
-            web_sys::console::log_1(&format!("filter_files result count={}", files.len()).into());
-            set_displayed_files.set(files);
-        }
-    });
-}
 #[derive(Clone, Debug, Deserialize)]
-struct RecommendItem { name: String, score: f32, source: String }
-
-#[derive(Clone, Debug, Deserialize)]
-struct UpdateInfo { current: String, latest: Option<String>, has_update: bool }
+struct UpdateInfo {
+    current: String,
+    latest: Option<String>,
+    has_update: bool,
+}

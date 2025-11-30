@@ -1,7 +1,6 @@
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::spawn_local;
 use web_sys::console;
 use js_sys::{Function, Promise, Reflect};
 

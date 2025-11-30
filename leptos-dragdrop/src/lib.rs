@@ -1,7 +1,5 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::spawn_local;
-use wasm_bindgen::JsValue;
 
 #[derive(Clone, Copy)]
 pub struct Node {
@@ -43,7 +41,6 @@ pub fn compute_drop_action(dragged_id: u32, target_id: u32, pos: f64, tags: &[No
     }
     let target_tag = tags.iter().find(|t| t.id == target_id).copied();
     let dragged_parent = tags.iter().find(|t| t.id == dragged_id).and_then(|t| t.parent_id);
-    let dragged_pos = tags.iter().find(|t| t.id == dragged_id).map(|t| t.position).unwrap_or(0);
     if let Some(tag) = target_tag {
         if pos < 0.25 {
             if tag.parent_id == dragged_parent {

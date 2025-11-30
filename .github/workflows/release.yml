@@ -63,6 +63,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'TagMe v__VERSION__'
           releaseBody: |
+            重构UI组件；优化自动更新逻辑；增加'Hide AI'按钮。
             后台每10分钟检查更新；标题栏更新按钮仅打开弹窗。
           releaseDraft: false
           prerelease: false
