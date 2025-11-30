@@ -31,4 +31,5 @@ notify = "7.0"
 async-openai = "0.19"
 base64 = "0.21"
 updater-flow = { path = "../updater-flow" }
+llm-flow = { path = "../llm-flow" }
  

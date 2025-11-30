@@ -19,6 +19,7 @@ web-sys = { version = "0.3", features = ["DragEvent", "DataTransfer", "HtmlEleme
 regex = "1.10"
 leptos-updater = { path = "leptos-updater" }
 leptos-dragdrop = { path = "leptos-dragdrop" }
+leptos-recommender = { path = "leptos-recommender" }
 
 [workspace]
-members = ["src-tauri", "updater-flow", "leptos-updater", "leptos-dragdrop"]
+members = ["src-tauri", "updater-flow", "leptos-updater", "leptos-dragdrop", "leptos-recommender", "llm-flow"]

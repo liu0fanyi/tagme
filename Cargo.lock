@@ -65,6 +65,7 @@ dependencies = [
  "async-openai",
  "base64 0.21.7",
  "hex",
+ "llm-flow",
  "notify",
  "rusqlite",
  "serde",
@@ -86,6 +87,7 @@ dependencies = [
  "js-sys",
  "leptos",
  "leptos-dragdrop",
+ "leptos-recommender",
  "leptos-updater",
  "leptos-use",
  "pulldown-cmark",
@@ -2652,6 +2654,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "leptos-recommender"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "leptos",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "leptos-updater"
 version = "0.1.0"
 dependencies = [
@@ -2866,6 +2882,17 @@ name = "litemap"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
+
+[[package]]
+name = "llm-flow"
+version = "0.1.0"
+dependencies = [
+ "async-openai",
+ "base64 0.21.7",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "lock_api"

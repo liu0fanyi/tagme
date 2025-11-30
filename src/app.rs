@@ -246,26 +246,15 @@ pub fn App() -> impl IntoView {
             for (i, f) in files.iter().enumerate() {
                 if cancel_sig.get_untracked() { break; }
                 let path = f.path.clone();
-                let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
                 let label_names: Vec<String> = tags.iter().map(|t| t.name.clone()).collect();
                 let tk = core::cmp::min(label_names.len(), 8);
-                if ["jpg","jpeg","png","webp"].contains(&ext.as_str()) {
-                    #[derive(Serialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct VisionArgs { image_path: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
-                    let args = VisionArgs { image_path: path.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/deepseek-vl2")) };
-                    let val = invoke("generate_image_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) { info_map.insert(path.clone(), list.clone()); let mut out: Vec<TagInfo> = Vec::new(); for item in list { if let Some(t) = tags.iter().find(|x| x.name == item.name) { out.push(t.clone()); } } tag_map.insert(f.id, out); }
-                } else {
-                    #[derive(Serialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct LlmArgs { title: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
-                    let title = std::path::Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                    if !title.is_empty() {
-                        let args = LlmArgs { title: title.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/DeepSeek-V3.2-Exp")) };
-                        let val = invoke("generate_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                        if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) { info_map.insert(path.clone(), list.clone()); let mut out: Vec<TagInfo> = Vec::new(); for item in list { if let Some(t) = tags.iter().find(|x| x.name == item.name) { out.push(t.clone()); } } tag_map.insert(f.id, out); }
-                    }
+                let list_ext = leptos_recommender::generate_for_file(path.clone(), label_names.clone(), tk, 0.6, Some(String::from("https://api.siliconflow.cn/v1")), None).await;
+                if !list_ext.is_empty() {
+                    let list: Vec<RecommendItem> = list_ext.into_iter().map(|ri| RecommendItem { name: ri.name, score: ri.score, source: ri.source }).collect();
+                    info_map.insert(path.clone(), list.clone());
+                    let mut out: Vec<TagInfo> = Vec::new();
+                    for item in list { if let Some(t) = tags.iter().find(|x| x.name == item.name) { out.push(t.clone()); } }
+                    tag_map.insert(f.id, out);
                 }
                 set_prog.set(i + 1);
                 if i % 5 == 4 { set_map.set(tag_map.clone()); set_info.set(info_map.clone()); }
@@ -1265,34 +1254,12 @@ pub fn App() -> impl IntoView {
                                         let mut done = 0usize;
                                         for path in files {
                                             if cancel_sig.get_untracked() { break; }
-                                            let ext = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).unwrap_or_default();
-                                            if ["jpg","jpeg","png","webp"].contains(&ext.as_str()) {
-                                                #[derive(Serialize)]
-                                                #[serde(rename_all = "camelCase")]
-                                                struct VisionArgs { image_path: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
-                                                let args = VisionArgs { image_path: path.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/deepseek-vl2")) };
-                                                let val = invoke("generate_image_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
-                                                    web_sys::console::log_1(&format!("[VL] items=[{}]", list.iter().map(|ri| format!("{}:{:.3}:{}", ri.name, ri.score, ri.source)).collect::<Vec<_>>().join(", ")).into());
-                                                    let mut map = file_recommended_info_map.get_untracked();
-                                                    map.insert(path.clone(), list);
-                                                    set_info.set(map);
-                                                }
-                                            } else {
-                                                #[derive(Serialize)]
-                                                #[serde(rename_all = "camelCase")]
-                                                struct LlmArgs { title: String, labels: Vec<String>, top_k: usize, threshold: f32, base_url: Option<String>, model: Option<String> }
-                                                let title = std::path::Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                                                if !title.is_empty() {
-                                                    let args = LlmArgs { title: title.clone(), labels: label_names.clone(), top_k: tk, threshold: 0.6, base_url: Some(String::from("https://api.siliconflow.cn/v1")), model: Some(String::from("deepseek-ai/DeepSeek-V3.2-Exp")) };
-                                                    let val = invoke("generate_tags_llm", serde_wasm_bindgen::to_value(&args).unwrap()).await;
-                                                    if let Ok(list) = serde_wasm_bindgen::from_value::<Vec<RecommendItem>>(val) {
-                                                        web_sys::console::log_1(&format!("[LLM] items=[{}]", list.iter().map(|ri| format!("{}:{:.3}:{}", ri.name, ri.score, ri.source)).collect::<Vec<_>>().join(", ")).into());
-                                                        let mut map = file_recommended_info_map.get_untracked();
-                                                        map.insert(path.clone(), list);
-                                                        set_info.set(map);
-                                                    }
-                                                }
+                                            let list_ext = leptos_recommender::generate_for_file(path.clone(), label_names.clone(), tk, 0.6, Some(String::from("https://api.siliconflow.cn/v1")), None).await;
+                                            if !list_ext.is_empty() {
+                                                let list: Vec<RecommendItem> = list_ext.into_iter().map(|ri| RecommendItem { name: ri.name, score: ri.score, source: ri.source }).collect();
+                                                let mut map = file_recommended_info_map.get_untracked();
+                                                map.insert(path.clone(), list);
+                                                set_info.set(map);
                                             }
                                             done += 1;
                                             set_prog.set(done);
