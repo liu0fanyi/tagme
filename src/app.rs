@@ -416,6 +416,7 @@ pub fn App() -> impl IntoView {
     let (dragging_tag_id, set_dragging_tag_id) = signal(None::<u32>);
     let (drop_target_tag_id, set_drop_target_tag_id) = signal(None::<u32>);
     let (drop_position, set_drop_position) = signal(0.5f64); // 0.0=top, 1.0=bottom
+    let (drag_just_ended, set_drag_just_ended) = signal(false);
     let (reload_tags_trigger, set_reload_tags_trigger) = signal(0u32);
     let (last_click_time, set_last_click_time) = signal(0.0);
     let (is_maximized, set_is_maximized) = signal(false);
@@ -502,6 +503,14 @@ pub fn App() -> impl IntoView {
                 
                 set_dragging_tag_id.set(None);
                 set_drop_target_tag_id.set(None);
+                set_drag_just_ended.set(true);
+                let win = web_sys::window().unwrap();
+                let clear_flag = set_drag_just_ended;
+                let clear = Closure::<dyn FnMut()>::new(move || {
+                    clear_flag.set(false);
+                });
+                let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(clear.as_ref().unchecked_ref(), 100);
+                clear.forget();
             }
         });
         
@@ -1199,6 +1208,8 @@ pub fn App() -> impl IntoView {
                         set_reload_tags_trigger=set_reload_tags_trigger
                         set_show_delete_tag_confirm=set_show_delete_tag_confirm
                         set_delete_target_tag_id=set_delete_target_tag_id
+                        drag_just_ended=drag_just_ended
+                        set_drag_just_ended=set_drag_just_ended
                     />
                 </div>
 
@@ -1648,6 +1659,8 @@ fn TagTree(
     drop_position: ReadSignal<f64>,
     set_drop_position: WriteSignal<f64>,
     set_reload_tags_trigger: WriteSignal<u32>,
+    drag_just_ended: ReadSignal<bool>,
+    set_drag_just_ended: WriteSignal<bool>,
 ) -> impl IntoView {
     let root_tags = move || {
         tags.get()
@@ -1681,7 +1694,9 @@ fn TagTree(
                             set_drop_target_tag_id=set_drop_target_tag_id
                             drop_position=drop_position
                             set_drop_position=set_drop_position
-                            set_reload_tags_trigger=set_reload_tags_trigger
+                        set_reload_tags_trigger=set_reload_tags_trigger
+                        drag_just_ended=drag_just_ended
+                        set_drag_just_ended=set_drag_just_ended
                         />
                     }
                 }
@@ -1710,6 +1725,8 @@ fn TagNode(
     drop_position: ReadSignal<f64>,
     set_drop_position: WriteSignal<f64>,
     set_reload_tags_trigger: WriteSignal<u32>,
+    drag_just_ended: ReadSignal<bool>,
+    set_drag_just_ended: WriteSignal<bool>,
 ) -> AnyView {
     let tag_id = tag.id;
     let children = move || {
@@ -1745,8 +1762,6 @@ fn TagNode(
     // Mouse enter - track potential drop target
     let update_position = move |ev: &web_sys::MouseEvent| {
         if dragging_tag_id.get_untracked().is_some() {
-            set_drop_target_tag_id.set(Some(tag_id));
-            
             // Calculate relative position (0.0 = top, 1.0 = bottom)
             if let Some(target) = ev.current_target() {
                 if let Some(element) = target.dyn_ref::<web_sys::HtmlElement>() {
@@ -1756,10 +1771,31 @@ fn TagNode(
                     let height = rect.height();
                     
                     if height > 0.0 {
-                        let relative_y = ((y - top) / height).max(0.0).min(1.0);
+                        let mut relative_y = ((y - top) / height).max(0.0).min(1.0);
+                        // Default to current tag as drop target
+                        let mut target_id_effective = tag_id;
+
+                        // Unify separator between items: when靠近底部，重定向到下一个item的顶部
+                        if relative_y > 0.75 {
+                            let tags_list = all_tags.get_untracked();
+                            let mut siblings: Vec<&TagInfo> = tags_list
+                                .iter()
+                                .filter(|t| t.parent_id == tag.parent_id)
+                                .collect();
+                            siblings.sort_by_key(|t| t.position);
+                            if let Some(next) = siblings.iter().find(|t| t.position > tag.position) {
+                                target_id_effective = next.id;
+                                relative_y = 0.0; // 作为下一个item之前的分隔
+                            }
+                        } else if relative_y < 0.25 {
+                            // 明确为当前item之前的分隔
+                            relative_y = 0.0;
+                        }
+
+                        set_drop_target_tag_id.set(Some(target_id_effective));
                         set_drop_position.set(relative_y);
-                        web_sys::console::log_1(&format!("📍 Tag {} position: {:.2} (y:{}, top:{}, height:{})", 
-                            tag_id, relative_y, y, top, height).into());
+                        web_sys::console::log_1(&format!("📍 Tag {} -> target {} position: {:.2} (y:{}, top:{}, height:{})", 
+                            tag_id, target_id_effective, relative_y, y, top, height).into());
                     }
                 }
             }
@@ -1808,11 +1844,30 @@ fn TagNode(
                 on:mousedown=on_mousedown
                 on:mouseenter=on_mouseenter
                 on:mousemove=on_mousemove
+                on:click=move |ev: web_sys::MouseEvent| {
+                    if dragging_tag_id.get_untracked().is_some() || drag_just_ended.get_untracked() {
+                        ev.stop_propagation();
+                        ev.prevent_default();
+                    }
+                }
             >
                 <input
                     type="checkbox"
                     prop:checked=is_selected
-                    on:change=move |_| on_toggle(tag_id)
+                    on:change=move |ev: web_sys::Event| {
+                        if dragging_tag_id.get_untracked().is_none() && !drag_just_ended.get_untracked() {
+                            on_toggle(tag_id);
+                        } else {
+                            ev.stop_propagation();
+                            ev.prevent_default();
+                        }
+                    }
+                    on:click=move |ev: web_sys::MouseEvent| {
+                        if dragging_tag_id.get_untracked().is_some() || drag_just_ended.get_untracked() {
+                            ev.stop_propagation();
+                            ev.prevent_default();
+                        }
+                    }
                 />
                 <span class="tag-name" style=move || tag.color.clone().map(|c| format!("color: {}", c)).unwrap_or_default()>
                     {tag.name.clone()}
@@ -1858,7 +1913,9 @@ fn TagNode(
                                     set_drop_target_tag_id=set_drop_target_tag_id
                                     drop_position=drop_position
                                     set_drop_position=set_drop_position
-                                    set_reload_tags_trigger=set_reload_tags_trigger
+                                set_reload_tags_trigger=set_reload_tags_trigger
+                                drag_just_ended=drag_just_ended
+                                set_drag_just_ended=set_drag_just_ended
                                 />
                             }
                         }
